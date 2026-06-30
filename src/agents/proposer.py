@@ -45,6 +45,9 @@ class ProposerInput(BaseModel):
         atr: Average True Range on the entry timeframe (absolute price units).
         account_equity: Total account equity in USD for position sizing.
         risk_pct: Percentage of equity to risk on this trade (e.g. 1.0 = 1%).
+        liquidation_below_usd: Optional CoinGlass USD value of liquidation clusters
+            below the current price.  Passed through to the prompt so the
+            Proposer can adjust its stop placement if support is thin.
     """
 
     candidate: Candidate
@@ -52,6 +55,7 @@ class ProposerInput(BaseModel):
     atr: float = Field(..., gt=0)
     account_equity: float = Field(default=100_000.0, gt=0)
     risk_pct: float = Field(default=1.0, gt=0, le=5.0)
+    liquidation_below_usd: float | None = None  # CoinGlass liq support below entry
 
 
 class TradeProposal(BaseModel):
@@ -198,7 +202,13 @@ def _build_prompt(inp: ProposerInput) -> str:
         f"  ATR (1h):      {inp.atr:.6g}  (use as stop-sizing reference)\n"
         f"  Regime:        {c.regime.value}\n"
         f"  Scout confidence: {c.confidence:.3f}\n\n"
-        f"Rules:\n"
+        + (
+            f"Market microstructure:\n"
+            f"  Liquidation support below entry: "
+            f"{'${:,.0f}'.format(inp.liquidation_below_usd) if inp.liquidation_below_usd is not None else 'unknown'}\n\n"
+            if inp.liquidation_below_usd is not None else ""
+        )
+        + f"Rules:\n"
         f"  - Entry should be at or near the current price / {ma_label} level.\n"
         f"  - Stop should be 1.0–1.5 × ATR on the wrong side of the MA.\n"
         f"  - TP1 at ~1:1 R:R, TP2 at ~1:2 R:R, TP3 at ~1:3 R:R.\n"

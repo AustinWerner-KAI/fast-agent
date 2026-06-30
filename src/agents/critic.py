@@ -131,6 +131,8 @@ class CriticInput(BaseModel):
     book_ask_depth_usd: float | None = None
     fomc_hours_until: float | None = None
     min_rr: float = Field(default=1.5, gt=0)
+    liquidation_below_usd: float | None = None  # CoinGlass: USD liq support below entry
+    oi_change_24h_pct: float | None = None       # CoinGlass: OI 24h change %
 
 
 class CriticReport(BaseModel):
@@ -265,6 +267,11 @@ def _build_prompt(inp: CriticInput) -> str:
         f"  Orderbook depth:    {book_str}\n"
         f"  Next FOMC:          {fomc_str}\n"
         f"  Min R:R required:   {inp.min_rr:.2f}\n\n"
+        "MARKET MICROSTRUCTURE (CoinGlass):\n"
+        f"  Liquidation support below entry: "
+        f"{'${:,.0f}'.format(inp.liquidation_below_usd) if inp.liquidation_below_usd is not None else 'unknown'}\n"
+        f"  OI change 24h:      "
+        f"{'{:+.1f}%'.format(inp.oi_change_24h_pct) if inp.oi_change_24h_pct is not None else 'unknown'}\n\n"
         "KILL CODE TAXONOMY:\n"
         "  THIN_LIQUIDITY         — insufficient depth to fill without damaging slippage\n"
         "  FUNDING_CROWDED        — extreme funding rate signals a crowded trade\n"
