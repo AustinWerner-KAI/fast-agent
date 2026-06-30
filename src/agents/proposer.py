@@ -70,7 +70,7 @@ class TradeProposal(BaseModel):
         direction: LONG or SHORT.
         entry: Proposed entry price.
         stop: Stop loss price.
-        tp1: Take profit 1 (~1:1 R:R).
+        tp1: Take profit 1 (~2:1 R:R).
         tp2: Take profit 2 (~1:2 R:R).
         tp3: Take profit 3 (~1:3 R:R).
         position_size_usd: Notional position size in USD.
