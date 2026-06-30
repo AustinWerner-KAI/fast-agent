@@ -148,7 +148,7 @@ _PROPOSAL_TOOL: dict[str, Any] = {
             },
             "tp1": {
                 "type": "number",
-                "description": "Take-profit 1: approximately 1:1 R:R from entry.",
+                "description": "Take-profit 1: approximately 2:1 R:R from entry. Must achieve at least 1.5:1 R:R.",
             },
             "tp2": {
                 "type": "number",
