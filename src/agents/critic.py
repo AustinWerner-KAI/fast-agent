@@ -123,6 +123,10 @@ class CriticInput(BaseModel):
         fomc_hours_until: Hours until the next FOMC announcement.
             None if not known.
         min_rr: Minimum acceptable R:R ratio to TP1.
+        liquidation_below_usd: CoinGlass USD liq support below entry.
+        oi_change_24h_pct: CoinGlass OI 24h change %.
+        decision_history: Last N decisions for this symbol from decision_memory,
+            used to inject past-outcome context into the prompt.  None = no history.
     """
 
     proposal: TradeProposal
@@ -133,6 +137,7 @@ class CriticInput(BaseModel):
     min_rr: float = Field(default=1.5, gt=0)
     liquidation_below_usd: float | None = None  # CoinGlass: USD liq support below entry
     oi_change_24h_pct: float | None = None       # CoinGlass: OI 24h change %
+    decision_history: list[dict] | None = None   # from decision_memory.get_history()
 
 
 class CriticReport(BaseModel):
@@ -248,8 +253,23 @@ def _build_prompt(inp: CriticInput) -> str:
     if inp.funding_rate is not None:
         funding_str += f"  ({inp.funding_rate * 100:.4f}% per 8h)"
 
+    # Decision memory block — injected when past history is available
+    history_section = ""
+    if inp.decision_history:
+        try:
+            from src.pipeline.decision_memory import format_history_block
+            history_section = (
+                format_history_block(p.symbol, inp.decision_history)
+                + "\nUse this history to calibrate your critique: if recent GO decisions "
+                "for this symbol and direction produced negative outcomes, apply stricter "
+                "scrutiny and prefer higher severity on borderline objections.\n\n"
+            )
+        except Exception:
+            pass  # history injection is non-fatal
+
     return (
-        "You are an adversarial trade critic. Review the proposal below and raise objections "
+        history_section
+        + "You are an adversarial trade critic. Review the proposal below and raise objections "
         "for any genuine concerns using the KILL taxonomy provided.\n\n"
         "PROPOSAL:\n"
         f"  Symbol:      {p.symbol}\n"

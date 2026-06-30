@@ -20,16 +20,22 @@ Public surface:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
 from src.agents.critic import CriticReport, KillCode, Severity
 from src.agents.proposer import TradeProposal
+
+if TYPE_CHECKING:
+    from src.agents.scout import Candidate
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = [
     "ArbiterVerdict", "KillLogEntry", "ArbiterDecision",
@@ -195,6 +201,9 @@ def arbitrate(
     proposal: TradeProposal,
     report: CriticReport,
     log_path: Path | None = None,
+    candidate: "Candidate | None" = None,
+    funding_rate: float | None = None,
+    memory_log_path: Path | None = None,
 ) -> ArbiterDecision:
     """Apply Arbiter rules and produce a final GO / NO-GO decision.
 
@@ -210,12 +219,21 @@ def arbitrate(
     NO_GO decisions are not written to the log — they never reached the
     execution layer and carry no outcome signal.
 
+    Every decision (GO and NO_GO alike) is also appended to the decision
+    memory store when ``candidate`` is provided, so past outcomes can
+    inform future Critic LLM prompts.
+
     Args:
         proposal: The TradeProposal from the Proposer.
         report: The CriticReport from the Critic.
         log_path: Path to the KILL log file.  Resolved from the
             ``FAST_AGENT_KILL_LOG`` env var if omitted, defaulting to
             ``kill_log.jsonl`` in the current working directory.
+        candidate: Scout Candidate for the decision (used by decision memory).
+            When None, decision memory logging is skipped.
+        funding_rate: Funding rate at decision time (passed to decision memory).
+        memory_log_path: Override path for the decision memory JSONL file.
+            When None, the default from env / hardcoded path is used.
 
     Returns:
         An ``ArbiterDecision`` with verdict, reason, and full proposal /
@@ -243,5 +261,12 @@ def arbitrate(
             _append_log(entry, effective_log_path)
         except OSError as exc:
             raise ArbiterError(f"Failed to write KILL log at {effective_log_path}: {exc}") from exc
+
+    if candidate is not None:
+        try:
+            from src.pipeline.decision_memory import log_decision
+            log_decision(candidate, decision, funding_rate=funding_rate, memory_path=memory_log_path)
+        except Exception as exc:
+            _LOG.warning("decision_memory: log_decision failed (non-fatal): %s", exc)
 
     return decision

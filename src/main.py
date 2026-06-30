@@ -34,6 +34,7 @@ from src.agents.scout import scan, DEFAULT_SYMBOLS, ENTRY_TF
 from src.agents.proposer import ProposerInput, propose, ProposerError
 from src.agents.critic import CriticInput, critique, CriticError
 from src.agents.arbiter import arbitrate, ArbiterVerdict, ArbiterError
+from src.pipeline.decision_memory import get_history
 
 _DIVIDER = "=" * 64
 _ATR_PERIOD = 14
@@ -195,12 +196,20 @@ def _run_replay(
                 print(f"  [PROPOSER ERR] {candidate.symbol}: {exc}")
                 continue
 
+            # --- Decision memory: fetch past history before Critic LLM call ---
+            funding_rate = _latest_funding(state.pit, candidate.symbol)
+            try:
+                history = get_history(candidate.symbol, n=5)
+            except Exception:
+                history = []
+
             # --- Critic ---
             try:
                 report = critique(
                     CriticInput(
                         proposal=proposal,
-                        funding_rate=_latest_funding(state.pit, candidate.symbol),
+                        funding_rate=funding_rate,
+                        decision_history=history if history else None,
                     ),
                     client=client,
                 )
@@ -211,7 +220,13 @@ def _run_replay(
 
             # --- Arbiter ---
             try:
-                decision = arbitrate(proposal, report, log_path=kill_log_path)
+                decision = arbitrate(
+                    proposal,
+                    report,
+                    log_path=kill_log_path,
+                    candidate=candidate,
+                    funding_rate=funding_rate,
+                )
             except ArbiterError as exc:
                 print(f"  [ARBITER ERR] {candidate.symbol}: {exc}")
                 continue
