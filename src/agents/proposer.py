@@ -210,8 +210,8 @@ def _build_prompt(inp: ProposerInput) -> str:
         )
         + f"Rules:\n"
         f"  - Entry should be at or near the current price / {ma_label} level.\n"
-        f"  - Stop should be 1.0–1.5 × ATR on the wrong side of the MA.\n"
-        f"  - TP1 at ~1:1 R:R, TP2 at ~1:2 R:R, TP3 at ~1:3 R:R.\n"
+        f"  - Stop should be 0.5–1.0 × ATR on the wrong side of the MA (keep it tight).\n"
+        f"  - TP1 at 2:1 R:R (twice the stop distance from entry), TP2 at 3:1, TP3 at 4:1.\n"
         f"  - All prices must be positive and geometrically valid for a {c.direction}.\n\n"
         f"Call submit_trade_proposal with your proposed levels and a brief reasoning."
     )
