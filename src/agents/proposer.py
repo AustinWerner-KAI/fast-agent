@@ -142,7 +142,7 @@ _PROPOSAL_TOOL: dict[str, Any] = {
             "stop": {
                 "type": "number",
                 "description": (
-                    "Stop-loss price. LONG: below entry by ~1–1.5 ATR. "
+                    "Stop-loss price. LONG: below entry by ~0.5–1 ATR. Keep stops tight — mean-reversion entry, not a swing stop. "
                     "SHORT: above entry by ~1–1.5 ATR."
                 ),
             },
