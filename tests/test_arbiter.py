@@ -42,24 +42,14 @@ _TS = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 def _proposal(
     symbol: str = "BTC",
-    direction: str = "LONG",
     confidence: float = 0.85,
 ) -> TradeProposal:
-    if direction == "LONG":
-        return TradeProposal(
-            symbol=symbol, direction="LONG",
-            entry=50_000.0, stop=49_000.0,
-            tp1=51_000.0, tp2=52_000.0, tp3=53_000.0,
-            position_size_usd=50_000.0, risk_usd=1_000.0,
-            risk_reward=1.0, reasoning="EMA-50 bounce.",
-            confidence=confidence, ts=_TS,
-        )
     return TradeProposal(
-        symbol=symbol, direction="SHORT",
-        entry=50_000.0, stop=51_000.0,
-        tp1=49_000.0, tp2=48_000.0, tp3=47_000.0,
+        symbol=symbol, direction="LONG",
+        entry=50_000.0, stop=49_000.0,
+        tp1=51_000.0, tp2=52_000.0, tp3=53_000.0,
         position_size_usd=50_000.0, risk_usd=1_000.0,
-        risk_reward=1.0, reasoning="EMA-50 short bounce.",
+        risk_reward=1.0, reasoning="EMA-50 bounce.",
         confidence=confidence, ts=_TS,
     )
 
@@ -439,9 +429,9 @@ class TestArbitrateKillLog:
 
     def test_log_entry_has_correct_direction(self, tmp_path: Path) -> None:
         log = tmp_path / "kill_log.jsonl"
-        arbitrate(_proposal(direction="SHORT"), _report([]), log_path=log)
+        arbitrate(_proposal(), _report([]), log_path=log)
         lines = _read_log_lines(log)
-        assert lines[0]["direction"] == "SHORT"
+        assert lines[0]["direction"] == "LONG"
 
     def test_log_entry_verdict_is_go(self, tmp_path: Path) -> None:
         log = tmp_path / "kill_log.jsonl"

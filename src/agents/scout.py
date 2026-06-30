@@ -43,7 +43,7 @@ class Candidate(BaseModel):
 
     Attributes:
         symbol: Coin name (e.g. ``"BTC"``).
-        direction: Trade direction implied by trend alignment.
+        direction: Always ``"LONG"`` — this pipeline is long-only.
         ma_period: EMA period that price is pulling back to (20, 50, or 200).
         distance_to_ma_pct: Signed distance from current price to MA.
             Positive = price above MA; negative = price below MA.
@@ -53,7 +53,7 @@ class Candidate(BaseModel):
     """
 
     symbol: str
-    direction: Literal["LONG", "SHORT"]
+    direction: Literal["LONG"]
     ma_period: int
     distance_to_ma_pct: float
     regime: Regime
@@ -120,28 +120,24 @@ def _score_confidence(distance_pct: float, adx: float) -> float:
     return round(0.7 * proximity + 0.3 * adx_score, 6)
 
 
-def _check_trend_alignment(df: pd.DataFrame, direction: Literal["LONG", "SHORT"], ma_period: int) -> bool:
-    """Return True when the daily trend confirms the desired direction.
+def _check_trend_alignment(df: pd.DataFrame, ma_period: int) -> bool:
+    """Return True when the daily trend confirms a LONG setup.
 
-    LONG requires last daily close > EMA-{ma_period} on the daily TF.
-    SHORT requires last daily close < EMA-{ma_period} on the daily TF.
+    Requires last daily close > EMA-{ma_period} on the daily TF.
 
     Args:
         df: Daily OHLCV DataFrame (oldest row first).
-        direction: Candidate direction to validate.
         ma_period: EMA period to compare against.
 
     Returns:
-        True when the daily EMA alignment matches ``direction``.
+        True when the daily close is above the EMA (LONG-aligned).
 
     Raises:
         InsufficientDataError: When ``df`` has fewer rows than ``ma_period``.
     """
     ema = _ema_current(df, ma_period)
     last_close = float(df["close"].iloc[-1])
-    if direction == "LONG":
-        return last_close > ema
-    return last_close < ema
+    return last_close > ema
 
 
 def _scan_symbol(
@@ -191,18 +187,13 @@ def _scan_symbol(
         if abs(dist_pct) > ENTRY_TOLERANCE_PCT:
             continue
 
-        # Determine direction from daily trend alignment
-        direction: Literal["LONG", "SHORT"] | None = None
+        # Only emit LONG candidates: daily close must be above the EMA
         try:
-            if _check_trend_alignment(df_trend, "LONG", ma_period):
-                direction = "LONG"
-            elif _check_trend_alignment(df_trend, "SHORT", ma_period):
-                direction = "SHORT"
+            if not _check_trend_alignment(df_trend, ma_period):
+                continue
         except InsufficientDataError:
             continue
-
-        if direction is None:
-            continue
+        direction: Literal["LONG"] = "LONG"
 
         confidence = _score_confidence(dist_pct, regime_result.adx)
         candidates.append(

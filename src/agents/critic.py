@@ -269,11 +269,11 @@ def _build_prompt(inp: CriticInput) -> str:
 
     return (
         history_section
-        + "You are an adversarial trade critic. Review the proposal below and raise objections "
-        "for any genuine concerns using the KILL taxonomy provided.\n\n"
+        + "You are an adversarial trade critic. Review the LONG proposal below and raise "
+        "objections for any genuine concerns using the KILL taxonomy provided.\n\n"
         "PROPOSAL:\n"
         f"  Symbol:      {p.symbol}\n"
-        f"  Direction:   {p.direction}\n"
+        f"  Direction:   LONG\n"
         f"  Entry:       {p.entry:.6g}\n"
         f"  Stop:        {p.stop:.6g}  ({stop_dist_pct:.2f}% from entry)\n"
         f"  TP1:         {p.tp1:.6g}  (R:R to TP1: {p.risk_reward:.2f})\n"

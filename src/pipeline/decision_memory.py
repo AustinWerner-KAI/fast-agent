@@ -309,8 +309,9 @@ def get_history(
         _LOG.warning("decision_memory: get_history could not read log: %s", exc)
         return []
 
-    # symbol_entries shares the same MemoryEntry objects as all_entries
-    symbol_entries = [e for e in all_entries if e.symbol == symbol]
+    # symbol_entries shares the same MemoryEntry objects as all_entries.
+    # Filter to LONG only — the pipeline is long-only; legacy SHORT entries are excluded.
+    symbol_entries = [e for e in all_entries if e.symbol == symbol and e.direction == "LONG"]
     if not symbol_entries:
         return []
 

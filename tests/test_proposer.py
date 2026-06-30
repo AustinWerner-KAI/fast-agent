@@ -33,14 +33,13 @@ _TS = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 def _candidate(
     symbol: str = "BTC",
-    direction: str = "LONG",
     ma_period: int = 50,
     distance_to_ma_pct: float = 0.3,
     confidence: float = 0.85,
 ) -> Candidate:
     return Candidate(
         symbol=symbol,
-        direction=direction,  # type: ignore[arg-type]
+        direction="LONG",
         ma_period=ma_period,
         distance_to_ma_pct=distance_to_ma_pct,
         regime=Regime.TREND,
@@ -140,43 +139,21 @@ class TestTradeProposal:
         base.update(overrides)
         return base
 
-    def _valid_short(self, **overrides: Any) -> dict[str, Any]:
-        base: dict[str, Any] = dict(
-            symbol="ETH", direction="SHORT",
-            entry=100.0, stop=102.0, tp1=98.0, tp2=96.0, tp3=94.0,
-            position_size_usd=5_000.0, risk_usd=100.0, risk_reward=1.0,
-            reasoning="ok", confidence=0.7, ts=_TS,
-        )
-        base.update(overrides)
-        return base
-
     def test_valid_long_constructs(self) -> None:
         p = TradeProposal(**self._valid_long())
         assert p.direction == "LONG"
 
-    def test_valid_short_constructs(self) -> None:
-        p = TradeProposal(**self._valid_short())
-        assert p.direction == "SHORT"
-
-    def test_long_stop_above_entry_rejected(self) -> None:
+    def test_stop_above_entry_rejected(self) -> None:
         with pytest.raises(Exception, match="stop"):
             TradeProposal(**self._valid_long(stop=101.0))
 
-    def test_long_tp1_below_entry_rejected(self) -> None:
+    def test_tp1_below_entry_rejected(self) -> None:
         with pytest.raises(Exception):
             TradeProposal(**self._valid_long(tp1=99.0))
 
-    def test_long_tps_not_ascending_rejected(self) -> None:
+    def test_tps_not_ascending_rejected(self) -> None:
         with pytest.raises(Exception):
             TradeProposal(**self._valid_long(tp2=101.5))  # tp2 < tp1=102
-
-    def test_short_stop_below_entry_rejected(self) -> None:
-        with pytest.raises(Exception, match="stop"):
-            TradeProposal(**self._valid_short(stop=99.0))
-
-    def test_short_tps_not_descending_rejected(self) -> None:
-        with pytest.raises(Exception):
-            TradeProposal(**self._valid_short(tp2=99.0))  # tp2 > tp1=98
 
     def test_confidence_out_of_range_rejected(self) -> None:
         with pytest.raises(Exception):
@@ -192,9 +169,9 @@ class TestBuildPrompt:
         prompt = _build_prompt(_inp(candidate=_candidate(symbol="ETH")))
         assert "ETH" in prompt
 
-    def test_contains_direction(self) -> None:
-        prompt = _build_prompt(_inp(candidate=_candidate(direction="SHORT")))
-        assert "SHORT" in prompt or "short" in prompt
+    def test_contains_long_direction(self) -> None:
+        prompt = _build_prompt(_inp())
+        assert "LONG" in prompt or "long" in prompt
 
     def test_contains_current_price(self) -> None:
         prompt = _build_prompt(_inp(current_price=42_000.0))
@@ -225,7 +202,7 @@ class TestComputeSizing:
     def test_long_risk_usd(self) -> None:
         risk_usd, _, _ = _compute_sizing(
             entry=100.0, stop=98.0, tp1=102.0,
-            direction="LONG", account_equity=100_000.0, risk_pct=1.0,
+            account_equity=100_000.0, risk_pct=1.0,
         )
         assert risk_usd == pytest.approx(1_000.0)
 
@@ -233,7 +210,7 @@ class TestComputeSizing:
         # stop_pct = 2/100 = 0.02; size = 1000/0.02 = 50_000
         _, position_size, _ = _compute_sizing(
             entry=100.0, stop=98.0, tp1=102.0,
-            direction="LONG", account_equity=100_000.0, risk_pct=1.0,
+            account_equity=100_000.0, risk_pct=1.0,
         )
         assert position_size == pytest.approx(50_000.0)
 
@@ -241,29 +218,21 @@ class TestComputeSizing:
         # reward = 102-100=2, risk = 100-98=2 → RR=1.0
         _, _, rr = _compute_sizing(
             entry=100.0, stop=98.0, tp1=102.0,
-            direction="LONG", account_equity=100_000.0, risk_pct=1.0,
-        )
-        assert rr == pytest.approx(1.0)
-
-    def test_short_risk_reward(self) -> None:
-        # reward = 100-98=2, risk = 102-100=2 → RR=1.0
-        _, _, rr = _compute_sizing(
-            entry=100.0, stop=102.0, tp1=98.0,
-            direction="SHORT", account_equity=100_000.0, risk_pct=1.0,
+            account_equity=100_000.0, risk_pct=1.0,
         )
         assert rr == pytest.approx(1.0)
 
     def test_two_to_one_rr(self) -> None:
         _, _, rr = _compute_sizing(
             entry=100.0, stop=98.0, tp1=104.0,
-            direction="LONG", account_equity=100_000.0, risk_pct=1.0,
+            account_equity=100_000.0, risk_pct=1.0,
         )
         assert rr == pytest.approx(2.0)
 
     def test_zero_stop_distance_returns_zeros(self) -> None:
         risk, size, rr = _compute_sizing(
             entry=100.0, stop=100.0, tp1=102.0,
-            direction="LONG", account_equity=100_000.0, risk_pct=1.0,
+            account_equity=100_000.0, risk_pct=1.0,
         )
         assert risk == 0.0
         assert size == 0.0
@@ -272,11 +241,11 @@ class TestComputeSizing:
     def test_higher_risk_pct_scales_size(self) -> None:
         _, size_1, _ = _compute_sizing(
             entry=100.0, stop=98.0, tp1=102.0,
-            direction="LONG", account_equity=100_000.0, risk_pct=1.0,
+            account_equity=100_000.0, risk_pct=1.0,
         )
         _, size_2, _ = _compute_sizing(
             entry=100.0, stop=98.0, tp1=102.0,
-            direction="LONG", account_equity=100_000.0, risk_pct=2.0,
+            account_equity=100_000.0, risk_pct=2.0,
         )
         assert size_2 == pytest.approx(size_1 * 2.0)
 
@@ -298,16 +267,6 @@ class TestParseResponse:
         assert proposal.direction == "LONG"
         assert proposal.entry == 50_000.0
         assert proposal.stop == 49_200.0
-
-    def test_valid_short_response_parsed(self) -> None:
-        inp = _inp(candidate=_candidate(direction="SHORT"))
-        response = _mock_response(
-            entry=50_000.0, stop=50_800.0,
-            tp1=49_200.0, tp2=48_400.0, tp3=47_600.0,
-        )
-        proposal = _parse_response(response, inp)
-        assert proposal.direction == "SHORT"
-        assert proposal.stop > proposal.entry
 
     def test_missing_tool_call_raises_proposer_error(self) -> None:
         inp = _inp()
@@ -418,18 +377,6 @@ class TestPropose:
             os.environ.pop("ANTHROPIC_API_KEY", None)
             with pytest.raises(ProposerError, match="ANTHROPIC_API_KEY"):
                 propose(_inp(), client=None)
-
-    def test_short_candidate_produces_short_proposal(self) -> None:
-        client = _mock_client(
-            _mock_response(
-                entry=50_000.0, stop=51_000.0,
-                tp1=49_000.0, tp2=48_000.0, tp3=47_000.0,
-            )
-        )
-        inp = _inp(candidate=_candidate(direction="SHORT"))
-        result = propose(inp, client=client)
-        assert result.direction == "SHORT"
-        assert result.stop > result.entry
 
     def test_messages_list_has_user_role(self) -> None:
         client = _mock_client(_mock_response())

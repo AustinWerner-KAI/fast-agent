@@ -177,27 +177,18 @@ class TestScoreConfidence:
 class TestCheckTrendAlignment:
     def test_long_price_above_ema_true(self) -> None:
         df = _rising_df(n=50, step=1.0)
-        assert _check_trend_alignment(df, "LONG", 20) is True
+        assert _check_trend_alignment(df, 20) is True
 
     def test_long_price_below_ema_false(self) -> None:
         # Reverse the rising series so price falls below its EMA
         df = _rising_df(n=50, step=1.0)
         df = df.iloc[::-1].reset_index(drop=True)
-        assert _check_trend_alignment(df, "LONG", 20) is False
-
-    def test_short_price_below_ema_true(self) -> None:
-        df = _rising_df(n=50, step=1.0)
-        df = df.iloc[::-1].reset_index(drop=True)
-        assert _check_trend_alignment(df, "SHORT", 20) is True
-
-    def test_short_price_above_ema_false(self) -> None:
-        df = _rising_df(n=50, step=1.0)
-        assert _check_trend_alignment(df, "SHORT", 20) is False
+        assert _check_trend_alignment(df, 20) is False
 
     def test_insufficient_daily_bars_raises(self) -> None:
         df = _flat_df(n=10)
         with pytest.raises(InsufficientDataError):
-            _check_trend_alignment(df, "LONG", 20)
+            _check_trend_alignment(df, 20)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +227,7 @@ class TestScanSymbol:
         for c in results:
             assert isinstance(c, Candidate)
             assert c.symbol == "BTC"
-            assert c.direction in ("LONG", "SHORT")
+            assert c.direction == "LONG"
             assert c.ma_period in (20, 50, 200)
             assert 0.0 <= c.confidence <= 1.0
             assert c.ts == _TS

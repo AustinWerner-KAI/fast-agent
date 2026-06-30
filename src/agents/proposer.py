@@ -82,7 +82,7 @@ class TradeProposal(BaseModel):
     """
 
     symbol: str
-    direction: Literal["LONG", "SHORT"]
+    direction: Literal["LONG"]
     entry: float = Field(..., gt=0)
     stop: float = Field(..., gt=0)
     tp1: float = Field(..., gt=0)
@@ -97,27 +97,16 @@ class TradeProposal(BaseModel):
 
     @model_validator(mode="after")
     def validate_geometry(self) -> "TradeProposal":
-        """Enforce that stop, entry, and TPs are on the correct sides."""
-        if self.direction == "LONG":
-            if not self.stop < self.entry:
-                raise ValueError(
-                    f"LONG stop ({self.stop}) must be strictly below entry ({self.entry})"
-                )
-            if not (self.entry < self.tp1 < self.tp2 < self.tp3):
-                raise ValueError(
-                    f"LONG TPs must be strictly increasing above entry "
-                    f"({self.entry}): tp1={self.tp1}, tp2={self.tp2}, tp3={self.tp3}"
-                )
-        else:
-            if not self.stop > self.entry:
-                raise ValueError(
-                    f"SHORT stop ({self.stop}) must be strictly above entry ({self.entry})"
-                )
-            if not (self.entry > self.tp1 > self.tp2 > self.tp3):
-                raise ValueError(
-                    f"SHORT TPs must be strictly decreasing below entry "
-                    f"({self.entry}): tp1={self.tp1}, tp2={self.tp2}, tp3={self.tp3}"
-                )
+        """Enforce LONG geometry: stop < entry < tp1 < tp2 < tp3."""
+        if not self.stop < self.entry:
+            raise ValueError(
+                f"stop ({self.stop}) must be strictly below entry ({self.entry})"
+            )
+        if not (self.entry < self.tp1 < self.tp2 < self.tp3):
+            raise ValueError(
+                f"TPs must be strictly increasing above entry "
+                f"({self.entry}): tp1={self.tp1}, tp2={self.tp2}, tp3={self.tp3}"
+            )
         return self
 
 
@@ -142,8 +131,8 @@ _PROPOSAL_TOOL: dict[str, Any] = {
             "stop": {
                 "type": "number",
                 "description": (
-                    "Stop-loss price. LONG: below entry by ~0.5–1 ATR. Keep stops tight — mean-reversion entry, not a swing stop. "
-                    "SHORT: above entry by ~0.5–1 ATR."
+                    "Stop-loss price. Must be below entry by 0.5–1.0 × ATR. "
+                    "Keep stops tight — this is a mean-reversion entry, not a swing stop."
                 ),
             },
             "tp1": {
@@ -185,17 +174,16 @@ def _build_prompt(inp: ProposerInput) -> str:
         Formatted prompt string.
     """
     c = inp.candidate
-    direction_word = "long" if c.direction == "LONG" else "short"
     ma_label = f"EMA-{c.ma_period}"
     dist_sign = "above" if c.distance_to_ma_pct >= 0 else "below"
     dist_abs = abs(c.distance_to_ma_pct)
 
     return (
-        f"You are a quantitative trade proposer. Generate a {direction_word} trade proposal "
+        f"You are a quantitative trade proposer. Generate a LONG trade proposal "
         f"for {c.symbol} based on the following context.\n\n"
         f"Signal summary:\n"
         f"  Symbol:        {c.symbol}\n"
-        f"  Direction:     {c.direction}\n"
+        f"  Direction:     LONG\n"
         f"  Setup:         Pullback to {ma_label} in a TREND regime\n"
         f"  Current price: {inp.current_price:.6g}\n"
         f"  Distance to {ma_label}: {dist_abs:.3f}% {dist_sign} the MA\n"
@@ -210,9 +198,11 @@ def _build_prompt(inp: ProposerInput) -> str:
         )
         + f"Rules:\n"
         f"  - Entry should be at or near the current price / {ma_label} level.\n"
-        f"  - Stop should be 0.5–1.0 × ATR on the wrong side of the MA (keep it tight).\n"
-        f"  - TP1 at 2:1 R:R (twice the stop distance from entry), TP2 at 3:1, TP3 at 4:1.\n"
-        f"  - All prices must be positive and geometrically valid for a {c.direction}.\n\n"
+        f"  - Stop must be BELOW entry by 0.5–1.0 × ATR (keep it tight).\n"
+        f"  - TP1 at 2:1 R:R (reward = 2 × stop distance above entry).\n"
+        f"  - TP2 at 3:1 R:R, TP3 at 4:1 R:R — all above TP1.\n"
+        f"  - Geometry: stop < entry < tp1 < tp2 < tp3 (all positive).\n\n"
+        f"Example: entry=100, stop=99 (1 ATR), tp1=102 (2:1), tp2=103 (3:1), tp3=104 (4:1).\n\n"
         f"Call submit_trade_proposal with your proposed levels and a brief reasoning."
     )
 
@@ -260,7 +250,6 @@ def _parse_response(
         entry=entry,
         stop=stop,
         tp1=tp1,
-        direction=inp.candidate.direction,
         account_equity=inp.account_equity,
         risk_pct=inp.risk_pct,
     )
@@ -289,17 +278,15 @@ def _compute_sizing(
     entry: float,
     stop: float,
     tp1: float,
-    direction: Literal["LONG", "SHORT"],
     account_equity: float,
     risk_pct: float,
 ) -> tuple[float, float, float]:
-    """Compute position sizing and R:R deterministically.
+    """Compute LONG position sizing and R:R deterministically.
 
     Args:
         entry: Entry price.
-        stop: Stop-loss price.
-        tp1: First take-profit price.
-        direction: LONG or SHORT.
+        stop: Stop-loss price (must be below entry).
+        tp1: First take-profit price (must be above entry).
         account_equity: Total equity in USD.
         risk_pct: Percentage of equity to risk.
 
@@ -314,11 +301,7 @@ def _compute_sizing(
     risk_usd = account_equity * risk_pct / 100.0
     stop_pct = stop_distance / entry
     position_size_usd = risk_usd / stop_pct
-
-    if direction == "LONG":
-        reward = tp1 - entry
-    else:
-        reward = entry - tp1
+    reward = tp1 - entry
     risk_reward = reward / stop_distance if stop_distance > 0 else 0.0
 
     return round(risk_usd, 2), round(position_size_usd, 2), round(risk_reward, 4)

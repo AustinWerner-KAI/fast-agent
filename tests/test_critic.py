@@ -48,7 +48,6 @@ def _candidate() -> Candidate:
 
 
 def _proposal(
-    direction: str = "LONG",
     entry: float = 50_000.0,
     stop: float = 49_000.0,
     tp1: float = 51_000.0,
@@ -57,12 +56,9 @@ def _proposal(
     risk_reward: float = 1.0,
     reasoning: str = "EMA-50 pullback with strong ADX.",
 ) -> TradeProposal:
-    if direction == "SHORT":
-        entry, stop, tp1, tp2, tp3 = 50_000.0, 51_000.0, 49_000.0, 48_000.0, 47_000.0
-        risk_reward = 1.0
     return TradeProposal(
         symbol="BTC",
-        direction=direction,  # type: ignore[arg-type]
+        direction="LONG",
         entry=entry,
         stop=stop,
         tp1=tp1,
@@ -309,9 +305,9 @@ class TestBuildPrompt:
     def test_mentions_submit_tool(self) -> None:
         assert "submit_critic_report" in _build_prompt(_inp())
 
-    def test_short_direction_in_prompt(self) -> None:
-        prompt = _build_prompt(_inp(proposal=_proposal(direction="SHORT")))
-        assert "SHORT" in prompt
+    def test_long_direction_in_prompt(self) -> None:
+        prompt = _build_prompt(_inp())
+        assert "LONG" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -498,8 +494,8 @@ class TestCritique:
         result = critique(_inp(), client=client)
         assert result.verdict == Verdict.KILL
 
-    def test_short_proposal_critique(self) -> None:
+    def test_long_proposal_critique(self) -> None:
         client = _mock_client(_mock_response(objections=[]))
-        result = critique(_inp(proposal=_proposal(direction="SHORT")), client=client)
-        assert result.proposal.direction == "SHORT"
+        result = critique(_inp(proposal=_proposal()), client=client)
+        assert result.proposal.direction == "LONG"
         assert result.verdict == Verdict.PASS
