@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import anthropic
 from pydantic import BaseModel, Field
@@ -141,6 +141,10 @@ class CriticInput(BaseModel):
     ls_ratio_long_pct: float | None = None        # CoinGlass: % accounts long (0–100)
     ls_ratio_short_pct: float | None = None       # CoinGlass: % accounts short (0–100)
     decision_history: list[dict] | None = None    # from decision_memory.get_history()
+    daily_trend_direction: Literal["UP", "DOWN"] | None = None
+    """Computed daily EMA-20 trend direction.  'UP' = close > EMA-20 and slope
+    positive; 'DOWN' otherwise.  When 'DOWN' on a LONG proposal, REGIME_MISMATCH
+    is injected at HIGH severity regardless of the LLM's objection list."""
 
 
 class CriticReport(BaseModel):
@@ -289,7 +293,8 @@ def _build_prompt(inp: CriticInput) -> str:
         f"  Funding rate:       {funding_str}\n"
         f"  Orderbook depth:    {book_str}\n"
         f"  Next FOMC:          {fomc_str}\n"
-        f"  Min R:R required:   {inp.min_rr:.2f}\n\n"
+        f"  Min R:R required:   {inp.min_rr:.2f}\n"
+        f"  Daily trend (EMA-20): {inp.daily_trend_direction or 'unknown'}\n\n"
         "MARKET MICROSTRUCTURE (CoinGlass):\n"
         f"  Liq clusters below entry: "
         f"{'${:,.0f}'.format(inp.liquidation_below_usd) if inp.liquidation_below_usd is not None else 'unknown'}"
@@ -303,7 +308,15 @@ def _build_prompt(inp: CriticInput) -> str:
             else "unknown"
         )
         + "\n\n"
-        "KILL CODE TAXONOMY:\n"
+        + (
+            "MANDATORY RULE — DO NOT SKIP: Daily trend (EMA-20) is DOWN on this LONG "
+            "proposal. You MUST include REGIME_MISMATCH at HIGH severity in your "
+            "objections. This is not discretionary — it is enforced programmatically "
+            "even if you omit it.\n\n"
+            if inp.daily_trend_direction == "DOWN"
+            else ""
+        )
+        + "KILL CODE TAXONOMY:\n"
         "  THIN_LIQUIDITY         — insufficient depth to fill without damaging slippage\n"
         "  FUNDING_CROWDED        — extreme funding rate signals a crowded trade\n"
         "  BOOK_IMBALANCE_AGAINST — orderbook stacked against the direction\n"
@@ -375,6 +388,24 @@ def _parse_response(
             )
         except (KeyError, ValueError) as exc:
             raise CriticError(f"Invalid objection at index {i}: {exc}") from exc
+
+    # Deterministic enforcement: daily EMA-20 DOWN on a LONG → REGIME_MISMATCH:HIGH,
+    # regardless of what the LLM returned.  The prompt already instructs the model to
+    # include it, but we inject it here so the guarantee is code-level, not prompt-level.
+    if inp.daily_trend_direction == "DOWN":
+        already_present = any(o.kill_code == KillCode.REGIME_MISMATCH for o in objections)
+        if not already_present:
+            objections.append(
+                Objection(
+                    kill_code=KillCode.REGIME_MISMATCH,
+                    severity=Severity.HIGH,
+                    reasoning=(
+                        "Daily EMA-20 trend is DOWN (close below EMA-20 or EMA-20 slope "
+                        "negative) while proposal direction is LONG — deterministic regime "
+                        "mismatch injected by the critic harness."
+                    ),
+                )
+            )
 
     has_high = any(obj.severity == Severity.HIGH for obj in objections)
     verdict = Verdict.KILL if has_high else Verdict.PASS

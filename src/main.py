@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import anthropic
 import pandas as pd
@@ -38,7 +40,7 @@ from src.agents.scout import scan, DEFAULT_SYMBOLS, ENTRY_TF
 from src.agents.proposer import ProposerInput, propose, ProposerError
 from src.agents.critic import CriticInput, critique, CriticError
 from src.agents.arbiter import arbitrate, ArbiterVerdict, ArbiterError
-from src.pipeline.decision_memory import get_history, log_decision
+from src.pipeline.decision_memory import get_history
 from src.data.coinglass_client import fetch_all_sync, CoinGlassSnapshot
 
 _LOG = logging.getLogger(__name__)
@@ -128,6 +130,40 @@ def _latest_funding(pit: Any, symbol: str) -> float | None:
 # ---------------------------------------------------------------------------
 # Pipeline stages
 # ---------------------------------------------------------------------------
+
+def _last_decision_id() -> str:
+    """Return the UUID of the most recent entry arbitrate() just appended.
+
+    arbitrate() calls log_decision() internally, so the verdict_id is already
+    written before we reach the executor.  Reading the last line avoids a
+    second log_decision() call that would double-count GO decisions.
+    """
+    try:
+        path = Path(os.environ.get(
+            "FAST_AGENT_DECISION_MEMORY",
+            "/opt/fast-agent/logs/decision_memory.jsonl",
+        ))
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            end = f.tell()
+            if end == 0:
+                return str(uuid4())
+            pos = end - 1
+            # skip trailing newline / whitespace
+            f.seek(pos)
+            while pos > 0 and f.read(1) in (b"\n", b"\r", b" "):
+                pos -= 1
+                f.seek(pos)
+            # walk back to start of the last line
+            while pos > 0:
+                pos -= 1
+                f.seek(pos)
+                if f.read(1) == b"\n":
+                    break
+            return json.loads(f.readline().decode())["id"]
+    except Exception:
+        return str(uuid4())
+
 
 def _run_ingest(symbols: list[str], days: int, data_dir: Path) -> None:
     """Fetch and persist fresh OHLCV and funding data for all symbols.
@@ -262,6 +298,7 @@ def _run_replay(
                         oi_change_24h_pct=cg.oi_change_24h_pct,
                         ls_ratio_long_pct=cg.ls_long_pct,
                         ls_ratio_short_pct=cg.ls_short_pct,
+                        daily_trend_direction=candidate.daily_trend_direction,
                     ),
                     client=client,
                 )
@@ -298,11 +335,9 @@ def _run_replay(
                         except Exception as exc:
                             _LOG.warning("guard refresh failed (continuing): %s", exc)
 
-                    # Retrieve the verdict_id written by log_decision inside arbitrate().
-                    # decision_memory logs the entry and returns its UUID.
-                    verdict_id = log_decision(
-                        candidate, decision, funding_rate=funding_rate
-                    )
+                    # arbitrate() already called log_decision internally.
+                    # Read the UUID it wrote rather than logging a second time.
+                    verdict_id = _last_decision_id()
                     try:
                         exec_result = executor.execute(
                             verdict_id=verdict_id,
