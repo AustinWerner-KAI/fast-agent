@@ -168,12 +168,14 @@ class LiveBroker:
         except Exception:
             pass  # eth_account may not be installed; skip the check gracefully
 
+        from eth_account import Account  # type: ignore[import-untyped]
         from hyperliquid.exchange import Exchange  # type: ignore[import-untyped]
         from hyperliquid.utils import constants  # type: ignore[import-untyped]
 
         api_url = constants.TESTNET_API_URL if testnet else constants.MAINNET_API_URL
+        wallet = Account.from_key(self._private_key)
         self._exchange = Exchange(
-            self._private_key,
+            wallet,
             api_url,
             account_address=self._account_address,
         )
