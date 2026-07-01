@@ -39,6 +39,7 @@ from src.agents.proposer import ProposerInput, propose, ProposerError
 from src.agents.critic import CriticInput, critique, CriticError
 from src.agents.arbiter import arbitrate, ArbiterVerdict, ArbiterError
 from src.pipeline.decision_memory import get_history, log_decision
+from src.data.coinglass_client import fetch_all_sync, CoinGlassSnapshot
 
 _LOG = logging.getLogger(__name__)
 _DIVIDER = "=" * 64
@@ -219,6 +220,10 @@ def _run_replay(
             except Exception:
                 continue
 
+            # --- CoinGlass microstructure (fetched live before every LLM call) ---
+            cg: CoinGlassSnapshot = fetch_all_sync(candidate.symbol, current_price)
+            cg_dict = cg.to_dict()
+
             # --- Proposer ---
             try:
                 proposal = propose(
@@ -228,6 +233,7 @@ def _run_replay(
                         atr=atr,
                         account_equity=state.equity,
                         risk_pct=risk_pct,
+                        liquidation_below_usd=cg.liquidations_below_usd,
                     ),
                     client=client,
                 )
@@ -237,7 +243,8 @@ def _run_replay(
                 continue
 
             # --- Decision memory: fetch past history before Critic LLM call ---
-            funding_rate = _latest_funding(state.pit, candidate.symbol)
+            # Use live CoinGlass funding rate if available; fall back to parquet PIT data.
+            funding_rate = cg.funding_rate if cg.funding_rate is not None else _latest_funding(state.pit, candidate.symbol)
             try:
                 history = get_history(candidate.symbol, n=5)
             except Exception:
@@ -250,6 +257,11 @@ def _run_replay(
                         proposal=proposal,
                         funding_rate=funding_rate,
                         decision_history=history if history else None,
+                        liquidation_below_usd=cg.liquidations_below_usd,
+                        liquidation_above_usd=cg.liquidations_above_usd,
+                        oi_change_24h_pct=cg.oi_change_24h_pct,
+                        ls_ratio_long_pct=cg.ls_long_pct,
+                        ls_ratio_short_pct=cg.ls_short_pct,
                     ),
                     client=client,
                 )
@@ -258,7 +270,7 @@ def _run_replay(
                 print(f"  [CRITIC ERR] {candidate.symbol}: {exc}")
                 continue
 
-            # --- Arbiter ---
+            # --- Arbiter (deterministic pre-filter + Opus 4.8 final review) ---
             try:
                 decision = arbitrate(
                     proposal,
@@ -266,6 +278,8 @@ def _run_replay(
                     log_path=kill_log_path,
                     candidate=candidate,
                     funding_rate=funding_rate,
+                    coinglass_snapshot=cg_dict,
+                    client=client,
                 )
             except ArbiterError as exc:
                 print(f"  [ARBITER ERR] {candidate.symbol}: {exc}")
@@ -423,7 +437,11 @@ def main() -> None:
         try:
             from src.pipeline.position_manager import PositionManager
             _position_manager_obj = PositionManager(_broker)
-            asyncio.get_event_loop().create_task(_position_manager_obj.run())
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_position_manager_obj.run())
+            except RuntimeError:
+                pass  # no running loop at startup — position_manager deferred
         except Exception as exc:
             _LOG.warning("position_manager could not start: %s", exc)
     # ─────────────────────────────────────────────────────────────────────────

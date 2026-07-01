@@ -135,9 +135,12 @@ class CriticInput(BaseModel):
     book_ask_depth_usd: float | None = None
     fomc_hours_until: float | None = None
     min_rr: float = Field(default=1.5, gt=0)
-    liquidation_below_usd: float | None = None  # CoinGlass: USD liq support below entry
-    oi_change_24h_pct: float | None = None       # CoinGlass: OI 24h change %
-    decision_history: list[dict] | None = None   # from decision_memory.get_history()
+    liquidation_below_usd: float | None = None   # CoinGlass: USD liq clusters below entry
+    liquidation_above_usd: float | None = None   # CoinGlass: USD liq clusters above entry
+    oi_change_24h_pct: float | None = None        # CoinGlass: OI 24h change %
+    ls_ratio_long_pct: float | None = None        # CoinGlass: % accounts long (0–100)
+    ls_ratio_short_pct: float | None = None       # CoinGlass: % accounts short (0–100)
+    decision_history: list[dict] | None = None    # from decision_memory.get_history()
 
 
 class CriticReport(BaseModel):
@@ -288,10 +291,18 @@ def _build_prompt(inp: CriticInput) -> str:
         f"  Next FOMC:          {fomc_str}\n"
         f"  Min R:R required:   {inp.min_rr:.2f}\n\n"
         "MARKET MICROSTRUCTURE (CoinGlass):\n"
-        f"  Liquidation support below entry: "
-        f"{'${:,.0f}'.format(inp.liquidation_below_usd) if inp.liquidation_below_usd is not None else 'unknown'}\n"
-        f"  OI change 24h:      "
-        f"{'{:+.1f}%'.format(inp.oi_change_24h_pct) if inp.oi_change_24h_pct is not None else 'unknown'}\n\n"
+        f"  Liq clusters below entry: "
+        f"{'${:,.0f}'.format(inp.liquidation_below_usd) if inp.liquidation_below_usd is not None else 'unknown'}"
+        f"  (above: {'${:,.0f}'.format(inp.liquidation_above_usd) if inp.liquidation_above_usd is not None else 'unknown'})\n"
+        f"  OI change 24h:            "
+        f"{'{:+.1f}%'.format(inp.oi_change_24h_pct) if inp.oi_change_24h_pct is not None else 'unknown'}\n"
+        f"  L/S ratio (accounts):     "
+        + (
+            f"LONG {inp.ls_ratio_long_pct:.1f}% / SHORT {inp.ls_ratio_short_pct:.1f}%"
+            if inp.ls_ratio_long_pct is not None and inp.ls_ratio_short_pct is not None
+            else "unknown"
+        )
+        + "\n\n"
         "KILL CODE TAXONOMY:\n"
         "  THIN_LIQUIDITY         — insufficient depth to fill without damaging slippage\n"
         "  FUNDING_CROWDED        — extreme funding rate signals a crowded trade\n"

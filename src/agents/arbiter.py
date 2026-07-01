@@ -25,8 +25,9 @@ import os
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
+import anthropic
 from pydantic import BaseModel, Field
 
 from src.agents.critic import CriticReport, KillCode, Severity
@@ -44,6 +45,8 @@ __all__ = [
 
 _ENV_LOG_PATH = "FAST_AGENT_KILL_LOG"
 _DEFAULT_LOG_NAME = "kill_log.jsonl"
+_OPUS_MODEL = "claude-opus-4-8"
+_OPUS_MAX_TOKENS = 512
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +153,159 @@ def _apply_rules(report: CriticReport) -> tuple[ArbiterVerdict, str]:
     return ArbiterVerdict.GO, "no objections — clean proposal"
 
 
+# ---------------------------------------------------------------------------
+# Opus 4.8 final review (called only when deterministic rules would GO)
+# ---------------------------------------------------------------------------
+
+_OPUS_TOOL: list[dict] = [
+    {
+        "name": "submit_arbiter_verdict",
+        "description": "Submit the final GO or NO_GO verdict with reasoning.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "verdict": {
+                    "type": "string",
+                    "enum": ["GO", "NO_GO"],
+                    "description": "Final execution decision.",
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "1–3 sentences explaining the decision, referencing specific data points.",
+                },
+            },
+            "required": ["verdict", "reasoning"],
+        },
+    }
+]
+
+
+def _opus_review(
+    proposal: TradeProposal,
+    report: CriticReport,
+    coinglass: dict,
+    pre_filter_reason: str,
+    client: anthropic.Anthropic,
+) -> tuple[ArbiterVerdict, str]:
+    """Call Opus 4.8 for the final GO / NO_GO decision with full CoinGlass context.
+
+    Only called when deterministic pre-filter would produce GO.  Opus can
+    override to NO_GO based on microstructure hostility.
+
+    Args:
+        proposal: TradeProposal from the Proposer.
+        report: CriticReport (HIGH/2+MEDIUM already filtered out).
+        coinglass: CoinGlassSnapshot.to_dict() output.
+        pre_filter_reason: Human-readable deterministic outcome.
+        client: Anthropic client.
+
+    Returns:
+        Tuple of (ArbiterVerdict, reason string).
+    """
+    p = proposal
+    obj_lines = (
+        "\n".join(
+            f"  [{o.severity.value}] {o.kill_code.value}: {o.reasoning}"
+            for o in report.objections
+        )
+        or "  (none)"
+    )
+
+    cg = coinglass
+    funding_str = (
+        f"{cg['funding_rate_8h_pct']:+.5f}%"
+        if cg.get("funding_rate_8h_pct") is not None else "unknown"
+    )
+    oi_str = (
+        f"{cg['oi_change_24h_pct']:+.2f}%"
+        if cg.get("oi_change_24h_pct") is not None else "unknown"
+    )
+    liq_below = (
+        f"${cg['liquidations_below_usd']:,.0f}"
+        if cg.get("liquidations_below_usd") is not None else "unknown"
+    )
+    liq_above = (
+        f"${cg['liquidations_above_usd']:,.0f}"
+        if cg.get("liquidations_above_usd") is not None else "unknown"
+    )
+    ls_str = (
+        f"LONG {cg['ls_long_pct']:.1f}% / SHORT {cg['ls_short_pct']:.1f}%"
+        if cg.get("ls_long_pct") is not None and cg.get("ls_short_pct") is not None
+        else "unknown"
+    )
+
+    prompt = (
+        "You are the final Arbiter for a crypto swing-trading system.\n"
+        "The deterministic pre-filter has already blocked any HIGH-severity or 2+ MEDIUM "
+        "objections.  Your job is to make the final GO / NO_GO decision for a proposal that "
+        "passed those hard gates, using the full market microstructure context below.\n\n"
+        "TRADE PROPOSAL:\n"
+        f"  Symbol:      {p.symbol}\n"
+        f"  Direction:   {p.direction}\n"
+        f"  Entry:       {p.entry:.6g}\n"
+        f"  Stop:        {p.stop:.6g}\n"
+        f"  TP1:         {p.tp1:.6g}\n"
+        f"  TP2:         {p.tp2:.6g}\n"
+        f"  TP3:         {p.tp3:.6g}\n"
+        f"  Confidence:  {p.confidence:.3f}\n"
+        f"  Notional:    ${p.position_size_usd:,.0f}\n"
+        f"  Risk:        ${p.risk_usd:,.0f}\n"
+        f"  Reasoning:   {p.reasoning}\n\n"
+        "CRITIC OBJECTIONS (remaining after pre-filter):\n"
+        f"{obj_lines}\n\n"
+        "CRITIC ASSESSMENT:\n"
+        f"  {report.overall_assessment}\n\n"
+        "MARKET MICROSTRUCTURE (CoinGlass — live data):\n"
+        f"  Funding rate (8h):         {funding_str}\n"
+        f"  OI change 24h:             {oi_str}\n"
+        f"  Liq clusters below entry:  {liq_below}\n"
+        f"  Liq clusters above entry:  {liq_above}\n"
+        f"  Long/Short account ratio:  {ls_str}\n\n"
+        "PRE-FILTER OUTCOME:\n"
+        f"  {pre_filter_reason}\n\n"
+        "DECISION GUIDANCE:\n"
+        "  Vote NO_GO when microstructure is actively hostile: extreme funding "
+        "(|rate| > 0.05%), rapidly rising OI signalling a crowded trade, thin "
+        "liquidation support below entry relative to position risk, or a heavily "
+        "lopsided L/S ratio that indicates dangerous positioning.\n"
+        "  Vote GO when the trade is clean and microstructure is neutral or supportive.\n"
+        "  An empty objection list with neutral microstructure should be GO.\n\n"
+        "Call submit_arbiter_verdict with your final verdict and a 1–3 sentence "
+        "rationale that references specific CoinGlass data points."
+    )
+
+    try:
+        response = client.messages.create(
+            model=_OPUS_MODEL,
+            max_tokens=_OPUS_MAX_TOKENS,
+            tools=_OPUS_TOOL,  # type: ignore[arg-type]
+            tool_choice={"type": "any"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as exc:
+        _LOG.warning("arbiter: Opus call failed — falling back to pre-filter result: %s", exc)
+        return ArbiterVerdict.GO, f"{pre_filter_reason} (Opus unavailable: {exc})"
+
+    tool_input: dict | None = None
+    for block in response.content:
+        if hasattr(block, "type") and block.type == "tool_use" and block.name == "submit_arbiter_verdict":
+            tool_input = block.input  # type: ignore[attr-defined]
+            break
+
+    if tool_input is None:
+        _LOG.warning("arbiter: Opus returned no tool call — defaulting to pre-filter GO")
+        return ArbiterVerdict.GO, f"{pre_filter_reason} (Opus: no tool call)"
+
+    raw_verdict = tool_input.get("verdict", "GO")
+    reasoning: str = tool_input.get("reasoning", "")
+    verdict = ArbiterVerdict.GO if raw_verdict == "GO" else ArbiterVerdict.NO_GO
+    _LOG.info(
+        "arbiter: Opus verdict=%s symbol=%s reasoning=%s",
+        raw_verdict, proposal.symbol, reasoning[:120],
+    )
+    return verdict, f"[Opus] {reasoning}"
+
+
 def _make_log_entry(decision: ArbiterDecision) -> KillLogEntry:
     """Build a KillLogEntry from a GO ArbiterDecision.
 
@@ -204,47 +360,52 @@ def arbitrate(
     candidate: "Candidate | None" = None,
     funding_rate: float | None = None,
     memory_log_path: Path | None = None,
+    coinglass_snapshot: "dict | None" = None,
+    client: "anthropic.Anthropic | None" = None,
 ) -> ArbiterDecision:
-    """Apply Arbiter rules and produce a final GO / NO-GO decision.
+    """Apply Arbiter rules, then Opus 4.8 review, to produce a final GO / NO_GO.
 
-    Rules are evaluated in priority order:
-      1. Any HIGH-severity Critic objection → NO_GO.
-      2. Two or more MEDIUM-severity objections → NO_GO.
-      3. Otherwise → GO.
-
-    A GO decision is appended to the KILL log (append-only JSONL file) so
-    the system accumulates a record of every approved trade alongside the
-    kill codes that fired, for future outcome-correlation analysis.
-
-    NO_GO decisions are not written to the log — they never reached the
-    execution layer and carry no outcome signal.
-
-    Every decision (GO and NO_GO alike) is also appended to the decision
-    memory store when ``candidate`` is provided, so past outcomes can
-    inform future Critic LLM prompts.
+    Flow:
+      1. Deterministic pre-filter: any HIGH objection → NO_GO immediately.
+         Two or more MEDIUM objections → NO_GO immediately.
+      2. If the pre-filter would GO and an Anthropic client is provided,
+         call Opus 4.8 with full context (proposal + critic report + CoinGlass
+         microstructure).  Opus makes the final call and may override to NO_GO.
+      3. GO decisions are appended to the KILL log.
+      4. All decisions are appended to decision memory when a candidate is given.
 
     Args:
         proposal: The TradeProposal from the Proposer.
         report: The CriticReport from the Critic.
-        log_path: Path to the KILL log file.  Resolved from the
-            ``FAST_AGENT_KILL_LOG`` env var if omitted, defaulting to
-            ``kill_log.jsonl`` in the current working directory.
-        candidate: Scout Candidate for the decision (used by decision memory).
-            When None, decision memory logging is skipped.
-        funding_rate: Funding rate at decision time (passed to decision memory).
-        memory_log_path: Override path for the decision memory JSONL file.
-            When None, the default from env / hardcoded path is used.
+        log_path: Path to the KILL log file.  Resolved from
+            ``FAST_AGENT_KILL_LOG`` env var if omitted.
+        candidate: Scout Candidate (used by decision memory).
+        funding_rate: Funding rate at decision time (for memory logging).
+        memory_log_path: Override path for decision memory JSONL.
+        coinglass_snapshot: CoinGlassSnapshot.to_dict() for the symbol.
+            Passed to Opus so it sees live microstructure.  When None,
+            Opus still runs but sees all CoinGlass fields as "unknown".
+        client: Anthropic client for the Opus 4.8 call.  When None, the
+            pipeline runs deterministic-only (no LLM in the Arbiter).
 
     Returns:
-        An ``ArbiterDecision`` with verdict, reason, and full proposal /
-        report context.
+        ArbiterDecision with verdict, reason, and full context.
 
     Raises:
-        ArbiterError: If the log file cannot be written on a GO decision.
+        ArbiterError: If the KILL log cannot be written on a GO decision.
     """
     effective_log_path = _resolve_log_path(log_path)
-    verdict, reason = _apply_rules(report)
+
+    # ── Step 1: deterministic hard gates ────────────────────────────────
+    pre_verdict, pre_reason = _apply_rules(report)
     kill_codes_fired = [o.kill_code for o in report.objections]
+
+    # ── Step 2: Opus 4.8 final review (only when pre-filter says GO) ────
+    if pre_verdict == ArbiterVerdict.GO and client is not None:
+        cg = coinglass_snapshot or {}
+        verdict, reason = _opus_review(proposal, report, cg, pre_reason, client)
+    else:
+        verdict, reason = pre_verdict, pre_reason
 
     decision = ArbiterDecision(
         proposal=proposal,

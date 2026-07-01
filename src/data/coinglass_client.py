@@ -8,10 +8,12 @@ Auth: ``COINGLASS_API_KEY`` env var passed as ``CG-API-KEY`` HTTP header.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
@@ -280,3 +282,113 @@ async def get_ls_ratio(symbol: str) -> Optional[LSRatio]:
     except Exception as exc:  # noqa: BLE001
         _log.warning("coinglass_ls_ratio: %s for %s — %s", type(exc).__name__, symbol, exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Synchronous batch fetch (for use in the synchronous main.py pipeline)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CoinGlassSnapshot:
+    """All four CoinGlass data points for one symbol at one point in time.
+
+    All fields are Optional — any individual fetch failure leaves that field
+    None while the rest are still populated.
+    """
+
+    symbol: str
+    funding: Optional[FundingSnapshot] = None
+    oi: Optional[OISnapshot] = None
+    liquidations: Optional[LiquidationMap] = None
+    ls_ratio: Optional[LSRatio] = None
+
+    # Convenience accessors ------------------------------------------------
+
+    @property
+    def funding_rate(self) -> Optional[float]:
+        return self.funding.rate if self.funding else None
+
+    @property
+    def oi_change_24h_pct(self) -> Optional[float]:
+        return self.oi.oi_change_24h_pct if self.oi else None
+
+    @property
+    def liquidations_below_usd(self) -> Optional[float]:
+        return self.liquidations.liquidations_below_usd if self.liquidations else None
+
+    @property
+    def liquidations_above_usd(self) -> Optional[float]:
+        return self.liquidations.liquidations_above_usd if self.liquidations else None
+
+    @property
+    def ls_long_pct(self) -> Optional[float]:
+        return self.ls_ratio.long_pct if self.ls_ratio else None
+
+    @property
+    def ls_short_pct(self) -> Optional[float]:
+        return self.ls_ratio.short_pct if self.ls_ratio else None
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dict for injection into LLM prompts."""
+        return {
+            "symbol": self.symbol,
+            "funding_rate_8h_pct": (
+                round(self.funding_rate * 100, 5) if self.funding_rate is not None else None
+            ),
+            "oi_change_24h_pct": (
+                round(self.oi_change_24h_pct, 2) if self.oi_change_24h_pct is not None else None
+            ),
+            "liquidations_below_usd": (
+                round(self.liquidations_below_usd, 0) if self.liquidations_below_usd is not None else None
+            ),
+            "liquidations_above_usd": (
+                round(self.liquidations_above_usd, 0) if self.liquidations_above_usd is not None else None
+            ),
+            "ls_long_pct": (
+                round(self.ls_long_pct, 1) if self.ls_long_pct is not None else None
+            ),
+            "ls_short_pct": (
+                round(self.ls_short_pct, 1) if self.ls_short_pct is not None else None
+            ),
+        }
+
+
+async def _fetch_all_async(symbol: str, reference_price: float) -> CoinGlassSnapshot:
+    """Fetch all four data points concurrently."""
+    results = await asyncio.gather(
+        get_funding(symbol),
+        get_oi(symbol),
+        get_liquidations(symbol, reference_price),
+        get_ls_ratio(symbol),
+        return_exceptions=True,
+    )
+    funding, oi, liq, ls = (
+        r if not isinstance(r, Exception) else None for r in results
+    )
+    return CoinGlassSnapshot(
+        symbol=symbol,
+        funding=funding,  # type: ignore[arg-type]
+        oi=oi,  # type: ignore[arg-type]
+        liquidations=liq,  # type: ignore[arg-type]
+        ls_ratio=ls,  # type: ignore[arg-type]
+    )
+
+
+def fetch_all_sync(symbol: str, reference_price: float) -> CoinGlassSnapshot:
+    """Synchronous wrapper — runs the async batch fetch in a new event loop.
+
+    Safe to call from synchronous pipeline code.  Returns a CoinGlassSnapshot
+    where any failed individual fetch is None (non-fatal).
+
+    Args:
+        symbol: Coin name (e.g. "BTC").
+        reference_price: Entry price used to partition the liquidation heatmap.
+
+    Returns:
+        CoinGlassSnapshot with whichever fields succeeded.
+    """
+    try:
+        return asyncio.run(_fetch_all_async(symbol, reference_price))
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("coinglass_fetch_all: failed for %s — %s", symbol, exc)
+        return CoinGlassSnapshot(symbol=symbol)
