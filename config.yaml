@@ -1,0 +1,24 @@
+# fast-agent strategy configuration
+# This is the only file the pipeline reads strategy parameters from.
+# Do not store secrets here — use .env for API keys.
+
+# Universe of symbols scanned by Scout on every cycle.
+# All symbols must be listed on Hyperliquid perps.
+symbols:
+  - BTC
+  - ETH
+  - SOL
+  - ARB
+  - ADA
+  - DOGE
+  - TRX
+  - HYPE
+
+# Funding rate thresholds for FUNDING_CROWDED severity (% per 8h).
+# Applies to LONG proposals only. Negative funding always favours longs and
+# never triggers FUNDING_CROWDED regardless of magnitude.
+#   rate > funding_extreme_pct  → HIGH  (pre-filter veto via _apply_rules)
+#   rate > funding_moderate_pct → MEDIUM (non-blocking caution flag)
+#   rate ≤ funding_moderate_pct → no objection raised
+funding_extreme_pct: 0.10
+funding_moderate_pct: 0.05

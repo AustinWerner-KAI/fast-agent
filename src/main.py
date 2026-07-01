@@ -38,7 +38,8 @@ from src.harness.ingest import ingest_symbol
 from src.harness.replay import ReplayEngine
 from src.agents.scout import scan, DEFAULT_SYMBOLS, ENTRY_TF
 from src.agents.proposer import ProposerInput, propose, ProposerError
-from src.agents.critic import CriticInput, critique, CriticError
+from src.agents.critic import CriticInput, critique, CriticError, compute_funding_crowded_severity
+from src.utils.config_loader import load_funding_thresholds
 from src.agents.arbiter import arbitrate, ArbiterVerdict, ArbiterError
 from src.pipeline.decision_memory import get_history
 from src.data.coinglass_client import fetch_all_sync, CoinGlassSnapshot
@@ -286,6 +287,12 @@ def _run_replay(
             except Exception:
                 history = []
 
+            # --- Deterministic funding severity (computed once, not delegated to Haiku) ---
+            _extreme_pct, _moderate_pct = load_funding_thresholds()
+            funding_severity = compute_funding_crowded_severity(
+                funding_rate, candidate.direction, _extreme_pct, _moderate_pct
+            )
+
             # --- Critic ---
             try:
                 report = critique(
@@ -299,6 +306,7 @@ def _run_replay(
                         ls_ratio_long_pct=cg.ls_long_pct,
                         ls_ratio_short_pct=cg.ls_short_pct,
                         daily_trend_direction=candidate.daily_trend_direction,
+                        funding_crowded_severity=funding_severity,
                     ),
                     client=client,
                 )

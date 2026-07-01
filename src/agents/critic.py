@@ -30,7 +30,7 @@ MAX_TOKENS = 1024
 __all__ = [
     "KillCode", "Severity", "Verdict",
     "Objection", "CriticInput", "CriticReport",
-    "CriticError", "critique",
+    "CriticError", "critique", "compute_funding_crowded_severity",
 ]
 
 
@@ -145,6 +145,10 @@ class CriticInput(BaseModel):
     """Computed daily EMA-20 trend direction.  'UP' = close > EMA-20 and slope
     positive; 'DOWN' otherwise.  When 'DOWN' on a LONG proposal, REGIME_MISMATCH
     is injected at HIGH severity regardless of the LLM's objection list."""
+    funding_crowded_severity: Severity | None = None
+    """Pre-computed FUNDING_CROWDED severity (HIGH / MEDIUM / None).  When set,
+    the LLM's FUNDING_CROWDED output is stripped and replaced with this value.
+    None means the funding rate is not a concern (negative or below threshold)."""
 
 
 class CriticReport(BaseModel):
@@ -163,6 +167,42 @@ class CriticReport(BaseModel):
     verdict: Verdict
     overall_assessment: str
     ts: datetime
+
+
+# ---------------------------------------------------------------------------
+# Deterministic funding rate pre-check
+# ---------------------------------------------------------------------------
+
+def compute_funding_crowded_severity(
+    funding_rate: float | None,
+    direction: str,
+    extreme_pct: float = 0.10,
+    moderate_pct: float = 0.05,
+) -> Severity | None:
+    """Classify FUNDING_CROWDED severity from the funding rate without an LLM.
+
+    For LONG proposals only.  Negative funding favours longs and never triggers
+    an objection.  Thresholds are expressed as percentages per 8h.
+
+    Args:
+        funding_rate: 8h funding rate as a decimal (e.g. 0.001 = 0.1%/8h).
+        direction: Proposal direction — only ``"LONG"`` is assessed.
+        extreme_pct: Rate above this (%) → HIGH severity.  Default 0.10.
+        moderate_pct: Rate in ``(moderate_pct, extreme_pct]`` (%) → MEDIUM.  Default 0.05.
+
+    Returns:
+        ``Severity.HIGH``, ``Severity.MEDIUM``, or ``None`` (no objection warranted).
+    """
+    if funding_rate is None or direction != "LONG":
+        return None
+    rate_pct = funding_rate * 100.0
+    if rate_pct <= 0.0:
+        return None  # negative funding favours longs
+    if rate_pct > extreme_pct:
+        return Severity.HIGH
+    if rate_pct > moderate_pct:
+        return Severity.MEDIUM
+    return None  # below moderate threshold
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +300,26 @@ def _build_prompt(inp: CriticInput) -> str:
     if inp.funding_rate is not None:
         funding_str += f"  ({inp.funding_rate * 100:.4f}% per 8h)"
 
+    # Funding crowded line — pre-computed, shown as a fact not a judgement call
+    rate_pct = (inp.funding_rate or 0.0) * 100.0
+    if inp.funding_rate is None:
+        funding_crowded_line = "  FUNDING_CROWDED:       not assessed (rate unavailable)\n"
+    elif rate_pct <= 0.0:
+        funding_crowded_line = (
+            f"  FUNDING_CROWDED:       not applicable — negative funding ({rate_pct:+.4f}%/8h)"
+            " favours this LONG direction\n"
+        )
+    elif inp.funding_crowded_severity is not None:
+        funding_crowded_line = (
+            f"  FUNDING_CROWDED:       {inp.funding_crowded_severity.value} "
+            f"(pre-computed — {rate_pct:+.4f}%/8h)\n"
+        )
+    else:
+        funding_crowded_line = (
+            f"  FUNDING_CROWDED:       not applicable — rate {rate_pct:+.4f}%/8h "
+            "is below the moderate threshold\n"
+        )
+
     # Decision memory block — injected when past history is available
     history_section = ""
     if inp.decision_history:
@@ -291,7 +351,8 @@ def _build_prompt(inp: CriticInput) -> str:
         f"  Proposer reasoning: {p.reasoning}\n\n"
         "MARKET CONTEXT:\n"
         f"  Funding rate:       {funding_str}\n"
-        f"  Orderbook depth:    {book_str}\n"
+        + funding_crowded_line
+        + f"  Orderbook depth:    {book_str}\n"
         f"  Next FOMC:          {fomc_str}\n"
         f"  Min R:R required:   {inp.min_rr:.2f}\n"
         f"  Daily trend (EMA-20): {inp.daily_trend_direction or 'unknown'}\n\n"
@@ -318,12 +379,12 @@ def _build_prompt(inp: CriticInput) -> str:
         )
         + "KILL CODE TAXONOMY:\n"
         "  THIN_LIQUIDITY         — insufficient depth to fill without damaging slippage\n"
-        "  FUNDING_CROWDED        — extreme funding rate signals a crowded trade\n"
         "  BOOK_IMBALANCE_AGAINST — orderbook stacked against the direction\n"
         "  REGIME_MISMATCH        — structure contradicts the stated TREND regime\n"
         "  RR_INADEQUATE          — R:R to TP1 is below the minimum threshold\n"
         "  FOMC_WINDOW            — FOMC within 48h creates outsized macro uncertainty\n"
-        "  CHOP_STRUCTURE         — price action appears range-bound despite TREND label\n\n"
+        "  CHOP_STRUCTURE         — price action appears range-bound despite TREND label\n"
+        "  [FUNDING_CROWDED is pre-computed and shown above — do not raise it yourself]\n\n"
         "SEVERITY:\n"
         "  HIGH   — veto-level: blocks the trade\n"
         "  MEDIUM — notable: proceed at reduced size or with extra caution\n"
@@ -388,6 +449,24 @@ def _parse_response(
             )
         except (KeyError, ValueError) as exc:
             raise CriticError(f"Invalid objection at index {i}: {exc}") from exc
+
+    # Strip any FUNDING_CROWDED the LLM raised — it is controlled deterministically.
+    objections = [o for o in objections if o.kill_code != KillCode.FUNDING_CROWDED]
+
+    # Inject pre-computed FUNDING_CROWDED at the correct severity.
+    if inp.funding_crowded_severity in (Severity.HIGH, Severity.MEDIUM):
+        rate_pct = (inp.funding_rate or 0.0) * 100.0
+        level = "extreme" if inp.funding_crowded_severity == Severity.HIGH else "moderate"
+        objections.append(
+            Objection(
+                kill_code=KillCode.FUNDING_CROWDED,
+                severity=inp.funding_crowded_severity,
+                reasoning=(
+                    f"Funding rate {rate_pct:+.4f}%/8h exceeds the {level} threshold "
+                    f"— deterministic pre-computed severity ({inp.funding_crowded_severity.value})."
+                ),
+            )
+        )
 
     # Deterministic enforcement: daily EMA-20 DOWN on a LONG → REGIME_MISMATCH:HIGH,
     # regardless of what the LLM returned.  The prompt already instructs the model to
