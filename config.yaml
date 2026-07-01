@@ -13,6 +13,7 @@ symbols:
   - DOGE
   - TRX
   - HYPE
+  - ZEC
 
 # Funding rate thresholds for FUNDING_CROWDED severity (% per 8h).
 # Applies to LONG proposals only. Negative funding always favours longs and
