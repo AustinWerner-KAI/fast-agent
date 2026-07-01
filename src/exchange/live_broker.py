@@ -295,16 +295,36 @@ class LiveBroker:
             return []
 
     def get_free_margin(self) -> float:
-        """Return the withdrawable (free) margin on the main wallet.
+        """Return total available trading margin on the main wallet.
+
+        Hyperliquid uses spot USDC as perp collateral — the UI "Available to
+        Trade" is the sum of:
+          1. ``clearinghouseState.withdrawable``: excess cross-margin from open
+             perp positions (0.0 when no positions are open).
+          2. ``spotClearinghouseState.tokenToAvailableAfterMaintenance`` for
+             token 0 (USDC): undeployed spot USDC available as margin.
 
         Returns:
-            Withdrawable USD; 0.0 on error.
+            Combined available margin in USD; 0.0 on error.
         """
         try:
-            data = _http_post({"type": "clearinghouseState", "user": self._account_address})
-            return float(data.get("withdrawable", 0.0))
+            perp_data = _http_post({"type": "clearinghouseState", "user": self._account_address})
+            perp_withdrawable = float(perp_data.get("withdrawable", 0.0))
         except Exception:
-            return 0.0
+            perp_withdrawable = 0.0
+
+        try:
+            spot_data = _http_post({"type": "spotClearinghouseState", "user": self._account_address})
+            spot_usdc = 0.0
+            # tokenToAvailableAfterMaintenance is [[token_id, amount], ...]
+            for token_id, amount in spot_data.get("tokenToAvailableAfterMaintenance", []):
+                if int(token_id) == 0:  # USDC
+                    spot_usdc = float(amount)
+                    break
+        except Exception:
+            spot_usdc = 0.0
+
+        return perp_withdrawable + spot_usdc
 
     def get_equity(self) -> float:
         """Return total account equity (accountValue) on the main wallet.
