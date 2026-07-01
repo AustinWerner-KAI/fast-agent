@@ -186,11 +186,13 @@ def _opus_review(
     coinglass: dict,
     pre_filter_reason: str,
     client: anthropic.Anthropic,
+    funding_crowded_severity: "Severity | None" = None,
 ) -> tuple[ArbiterVerdict, str]:
     """Call Opus 4.8 for the final GO / NO_GO decision with full CoinGlass context.
 
     Only called when deterministic pre-filter would produce GO.  Opus can
-    override to NO_GO based on microstructure hostility.
+    override to NO_GO based on microstructure hostility, but must respect
+    the pre-computed FUNDING_CROWDED severity rather than re-assessing it.
 
     Args:
         proposal: TradeProposal from the Proposer.
@@ -198,6 +200,8 @@ def _opus_review(
         coinglass: CoinGlassSnapshot.to_dict() output.
         pre_filter_reason: Human-readable deterministic outcome.
         client: Anthropic client.
+        funding_crowded_severity: Pre-computed severity from the bracket rules.
+            None means funding is not a concern (negative or below threshold).
 
     Returns:
         Tuple of (ArbiterVerdict, reason string).
@@ -211,10 +215,13 @@ def _opus_review(
         or "  (none)"
     )
 
+    from src.agents.critic import Severity as _Severity  # local import to avoid circular
+
     cg = coinglass
+    funding_rate_raw = cg.get("funding_rate_8h_pct")
     funding_str = (
-        f"{cg['funding_rate_8h_pct']:+.5f}%"
-        if cg.get("funding_rate_8h_pct") is not None else "unknown"
+        f"{funding_rate_raw:+.5f}%"
+        if funding_rate_raw is not None else "unknown"
     )
     oi_str = (
         f"{cg['oi_change_24h_pct']:+.2f}%"
@@ -233,6 +240,29 @@ def _opus_review(
         if cg.get("ls_long_pct") is not None and cg.get("ls_short_pct") is not None
         else "unknown"
     )
+
+    # Build the pre-computed funding assessment line shown to Opus
+    if funding_rate_raw is None:
+        funding_assessment = "unknown — not assessed"
+    elif funding_rate_raw < 0:
+        funding_assessment = (
+            f"FAVOURABLE for this LONG ({funding_rate_raw:+.5f}%/8h) — "
+            "longs are being paid; do NOT treat negative funding as hostile"
+        )
+    elif funding_crowded_severity == _Severity.HIGH:
+        funding_assessment = (
+            f"HIGH — {funding_rate_raw:+.5f}%/8h exceeds the 0.10% extreme threshold "
+            "(already caught by pre-filter if applicable)"
+        )
+    elif funding_crowded_severity == _Severity.MEDIUM:
+        funding_assessment = (
+            f"MEDIUM — {funding_rate_raw:+.5f}%/8h is elevated (0.05–0.10% range); "
+            "caution warranted but not a veto"
+        )
+    else:
+        funding_assessment = (
+            f"NEUTRAL — {funding_rate_raw:+.5f}%/8h is below the 0.05% moderate threshold"
+        )
 
     prompt = (
         "You are the final Arbiter for a crypto swing-trading system.\n"
@@ -257,6 +287,7 @@ def _opus_review(
         f"  {report.overall_assessment}\n\n"
         "MARKET MICROSTRUCTURE (CoinGlass — live data):\n"
         f"  Funding rate (8h):         {funding_str}\n"
+        f"  Funding assessment:        {funding_assessment}\n"
         f"  OI change 24h:             {oi_str}\n"
         f"  Liq clusters below entry:  {liq_below}\n"
         f"  Liq clusters above entry:  {liq_above}\n"
@@ -264,10 +295,12 @@ def _opus_review(
         "PRE-FILTER OUTCOME:\n"
         f"  {pre_filter_reason}\n\n"
         "DECISION GUIDANCE:\n"
-        "  Vote NO_GO when microstructure is actively hostile: extreme funding "
-        "(|rate| > 0.05%), rapidly rising OI signalling a crowded trade, thin "
-        "liquidation support below entry relative to position risk, or a heavily "
-        "lopsided L/S ratio that indicates dangerous positioning.\n"
+        "  FUNDING: the 'Funding assessment' line above is pre-computed and authoritative — "
+        "do not override it.  Negative funding FAVOURS this LONG and must never be cited as "
+        "hostile.  Only positive rates above 0.10%/8h are extreme; 0.05–0.10% is moderate.\n"
+        "  Vote NO_GO when OTHER microstructure signals are hostile: rapidly rising OI "
+        "signalling a crowded trade, thin liquidation support below entry relative to "
+        "position risk, or a heavily lopsided L/S ratio indicating dangerous positioning.\n"
         "  Vote GO when the trade is clean and microstructure is neutral or supportive.\n"
         "  An empty objection list with neutral microstructure should be GO.\n\n"
         "Call submit_arbiter_verdict with your final verdict and a 1–3 sentence "
@@ -362,6 +395,7 @@ def arbitrate(
     memory_log_path: Path | None = None,
     coinglass_snapshot: "dict | None" = None,
     client: "anthropic.Anthropic | None" = None,
+    funding_crowded_severity: "Severity | None" = None,
 ) -> ArbiterDecision:
     """Apply Arbiter rules, then Opus 4.8 review, to produce a final GO / NO_GO.
 
@@ -387,6 +421,9 @@ def arbitrate(
             Opus still runs but sees all CoinGlass fields as "unknown".
         client: Anthropic client for the Opus 4.8 call.  When None, the
             pipeline runs deterministic-only (no LLM in the Arbiter).
+        funding_crowded_severity: Pre-computed FUNDING_CROWDED severity from
+            the bracket rules.  Passed to Opus so it does not re-assess the
+            funding rate independently.  None = not a concern.
 
     Returns:
         ArbiterDecision with verdict, reason, and full context.
@@ -403,7 +440,7 @@ def arbitrate(
     # ── Step 2: Opus 4.8 final review (only when pre-filter says GO) ────
     if pre_verdict == ArbiterVerdict.GO and client is not None:
         cg = coinglass_snapshot or {}
-        verdict, reason = _opus_review(proposal, report, cg, pre_reason, client)
+        verdict, reason = _opus_review(proposal, report, cg, pre_reason, client, funding_crowded_severity)
     else:
         verdict, reason = pre_verdict, pre_reason
 

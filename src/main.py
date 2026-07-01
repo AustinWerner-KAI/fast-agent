@@ -325,6 +325,7 @@ def _run_replay(
                     funding_rate=funding_rate,
                     coinglass_snapshot=cg_dict,
                     client=client,
+                    funding_crowded_severity=funding_severity,
                 )
             except ArbiterError as exc:
                 print(f"  [ARBITER ERR] {candidate.symbol}: {exc}")
