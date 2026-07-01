@@ -178,6 +178,32 @@ class LiveBroker:
             account_address=self._account_address,
         )
         self._testnet = testnet
+        self._sz_decimals: dict[str, int] = self._fetch_sz_decimals()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _fetch_sz_decimals(self) -> dict[str, int]:
+        """Fetch per-asset size precision from Hyperliquid meta endpoint.
+
+        Returns a symbol → szDecimals mapping.  Falls back to empty dict
+        (sizes will be sent unrounded) if the request fails.
+        """
+        try:
+            data = _http_post({"type": "meta"})
+            return {a["name"]: int(a["szDecimals"]) for a in data.get("universe", [])}
+        except Exception:
+            return {}
+
+    def _round_size(self, symbol: str, size: float) -> float:
+        """Round size to the szDecimals required by Hyperliquid for this symbol.
+
+        Hyperliquid's wire format rejects sizes with more decimal places than
+        the asset's ``szDecimals`` field.  Unknown symbols default to 5 d.p.
+        """
+        decimals = self._sz_decimals.get(symbol, 5)
+        return round(size, decimals)
 
     # ------------------------------------------------------------------
     # Order management
@@ -210,6 +236,9 @@ class LiveBroker:
             LiveBrokerError: On SDK or network error.
         """
         is_buy = side == "BUY"
+        size = self._round_size(symbol, size)
+        if size <= 0:
+            raise LiveBrokerError(f"place_order: size rounds to zero for {symbol}")
         try:
             if reduce_only:
                 result = self._exchange.market_close(
