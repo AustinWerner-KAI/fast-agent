@@ -1,7 +1,9 @@
-"""Main pipeline: ingest → replay → Scout → Proposer → Critic → Arbiter.
+"""Main pipeline: ingest → replay → Scout → Proposer → Critic → Arbiter → Executor.
 
-Paper-trading only — no orders are placed. Every Arbiter GO decision is
-appended to the KILL log (append-only JSONL) for future outcome analysis.
+Live execution is gated by TRADING_ENABLED=true in the environment (default
+false).  When enabled, every Arbiter GO decision is routed through the Executor,
+which applies circuit-breaker, position-guard, free-margin, and idempotency
+gates before placing a real order on Hyperliquid via an agent wallet.
 
 Usage:
     python -m src.main [options]
@@ -20,6 +22,8 @@ Options:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import os
 from collections import Counter
 from pathlib import Path
@@ -34,10 +38,44 @@ from src.agents.scout import scan, DEFAULT_SYMBOLS, ENTRY_TF
 from src.agents.proposer import ProposerInput, propose, ProposerError
 from src.agents.critic import CriticInput, critique, CriticError
 from src.agents.arbiter import arbitrate, ArbiterVerdict, ArbiterError
-from src.pipeline.decision_memory import get_history
+from src.pipeline.decision_memory import get_history, log_decision
 
+_LOG = logging.getLogger(__name__)
 _DIVIDER = "=" * 64
 _ATR_PERIOD = 14
+
+
+# ---------------------------------------------------------------------------
+# Live execution layer (lazy init — only when TRADING_ENABLED or broker reachable)
+# ---------------------------------------------------------------------------
+
+def _build_live_stack() -> tuple[Any, Any, Any, Any, Any] | None:
+    """Build broker + guard + breaker + reconciler + executor.
+
+    Returns None when the Hyperliquid SDK is unavailable or keys are missing.
+    On error, logs a warning and falls back to paper-only mode.
+    """
+    try:
+        from src.exchange.live_broker import LiveBroker, LiveBrokerError
+        from src.utils.position_guard import PositionGuard
+        from src.utils.circuit_breaker import CircuitBreaker
+        from src.utils.reconciliation import reconcile
+        from src.pipeline.executor import Executor
+
+        broker = LiveBroker()
+        guard = PositionGuard(broker)
+        breaker = CircuitBreaker(broker)
+        report = reconcile(broker)
+        if not report.ok:
+            _LOG.error(
+                "startup reconciliation FAILED — executor disabled: %s", report.error
+            )
+            return None
+        executor = Executor(broker, guard, breaker)
+        return broker, guard, breaker, report, executor
+    except Exception as exc:
+        _LOG.warning("live stack unavailable — paper-only mode: %s", exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +155,10 @@ def _run_replay(
     risk_pct: float,
     max_candidates: int,
     client: anthropic.Anthropic,
+    executor: Any = None,
+    position_guard: Any = None,
 ) -> dict[str, Any]:
-    """Drive the Scout → Proposer → Critic → Arbiter pipeline over replay.
+    """Drive the Scout → Proposer → Critic → Arbiter → Executor pipeline over replay.
 
     Streams the parquet store bar-by-bar via ReplayEngine. At each bar
     Scout scans for candidates; each candidate is processed through the full
@@ -233,6 +273,33 @@ def _run_replay(
 
             if decision.verdict == ArbiterVerdict.GO:
                 stats["go"] += 1
+
+                # --- Live execution ---
+                if executor is not None:
+                    # Refresh the position guard before each order so newly-opened
+                    # manual positions are detected before we attempt to trade them.
+                    if position_guard is not None:
+                        try:
+                            position_guard.refresh(bot_symbols=frozenset())
+                        except Exception as exc:
+                            _LOG.warning("guard refresh failed (continuing): %s", exc)
+
+                    # Retrieve the verdict_id written by log_decision inside arbitrate().
+                    # decision_memory logs the entry and returns its UUID.
+                    verdict_id = log_decision(
+                        candidate, decision, funding_rate=funding_rate
+                    )
+                    try:
+                        exec_result = executor.execute(
+                            verdict_id=verdict_id,
+                            proposal=proposal,
+                            candidate=candidate,
+                        )
+                        exec_state = exec_result.get("state", "unknown")
+                        print(f"    → EXEC {exec_state.upper()}")
+                    except Exception as exc:
+                        _LOG.error("executor.execute failed: %s", exc)
+                        print(f"    → EXEC ERROR: {exc}")
             else:
                 stats["no_go"] += 1
 
@@ -345,6 +412,22 @@ def main() -> None:
     else:
         print("Skipping ingest (--skip-ingest).\n")
 
+    # ── Startup: build live execution stack (reconciliation runs here) ───────
+    _executor = None
+    _guard = None
+    _position_manager = None
+    live_stack = _build_live_stack()
+    if live_stack is not None:
+        _broker, _guard, _breaker, _recon_report, _executor = live_stack
+        _position_manager_obj = None
+        try:
+            from src.pipeline.position_manager import PositionManager
+            _position_manager_obj = PositionManager(_broker)
+            asyncio.get_event_loop().create_task(_position_manager_obj.run())
+        except Exception as exc:
+            _LOG.warning("position_manager could not start: %s", exc)
+    # ─────────────────────────────────────────────────────────────────────────
+
     client = anthropic.Anthropic(api_key=api_key)
     stats = _run_replay(
         symbols=args.symbols,
@@ -354,6 +437,8 @@ def main() -> None:
         risk_pct=args.risk_pct,
         max_candidates=args.max_candidates,
         client=client,
+        executor=_executor,
+        position_guard=_guard,
     )
     _print_summary(stats, kill_log_path)
 
