@@ -1,6 +1,6 @@
-"""Market regime classifier: TREND / CHOP / VOLATILE.
+"""Market regime classifier: TREND / DOWNTREND / CHOP / VOLATILE.
 
-Priority order: VOLATILE (ATR%) > TREND (ADX) > CHOP.
+Priority order: VOLATILE (ATR%) > TREND/DOWNTREND (ADX + DI direction) > CHOP.
 All computation is deterministic from OHLCV data — no LLM calls.
 
 Public surface:
@@ -36,6 +36,7 @@ class Regime(str, Enum):
     """Market regime classification."""
 
     TREND = "TREND"
+    DOWNTREND = "DOWNTREND"
     CHOP = "CHOP"
     VOLATILE = "VOLATILE"
 
@@ -47,6 +48,8 @@ class RegimeResult(BaseModel):
         regime: Classified regime.
         adx: Average Directional Index value (0–100).
         atr_pct: ATR as a percentage of the last close price.
+        di_plus: Wilder DI+ at the final smoothed bar (0–100).
+        di_minus: Wilder DI- at the final smoothed bar (0–100).
         symbol: Coin name.
         timeframe: Candle interval used.
     """
@@ -54,6 +57,8 @@ class RegimeResult(BaseModel):
     regime: Regime
     adx: float = Field(..., ge=0.0)
     atr_pct: float = Field(..., ge=0.0)
+    di_plus: float = Field(default=0.0, ge=0.0)
+    di_minus: float = Field(default=0.0, ge=0.0)
     symbol: str
     timeframe: str
 
@@ -116,8 +121,8 @@ def _compute_atr_pct(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
     return atr / last_close * 100.0
 
 
-def _compute_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> float:
-    """Compute Wilder's Average Directional Index from OHLCV data.
+def _compute_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> tuple[float, float, float]:
+    """Compute Wilder's ADX, DI+, and DI- from OHLCV data.
 
     Builds a full DX series then Wilder-smooths it.  The minimum required
     rows is ``period + 1`` (to produce at least one TR/DM bar).
@@ -127,10 +132,11 @@ def _compute_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> float:
         period: ADX smoothing period (default 14).
 
     Returns:
-        ADX in [0, 100]. Returns 0.0 when fewer than ``period + 1`` rows exist.
+        Tuple of ``(adx, di_plus, di_minus)`` each in [0, 100].
+        Returns ``(0.0, 0.0, 0.0)`` when fewer than ``period + 1`` rows exist.
     """
     if len(df) < period + 1:
-        return 0.0
+        return 0.0, 0.0, 0.0
 
     highs = df["high"].to_numpy(dtype=float)
     lows = df["low"].to_numpy(dtype=float)
@@ -156,10 +162,10 @@ def _compute_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> float:
     dmm_s = sum(dm_minus[:period]) / period
 
     def _dx(dmp: float, dmm: float, atr: float) -> float:
-        di_plus = 100.0 * dmp / atr if atr > 0 else 0.0
-        di_minus = 100.0 * dmm / atr if atr > 0 else 0.0
-        denom = di_plus + di_minus
-        return 100.0 * abs(di_plus - di_minus) / denom if denom > 0 else 0.0
+        di_p = 100.0 * dmp / atr if atr > 0 else 0.0
+        di_m = 100.0 * dmm / atr if atr > 0 else 0.0
+        denom = di_p + di_m
+        return 100.0 * abs(di_p - di_m) / denom if denom > 0 else 0.0
 
     dx_series: list[float] = [_dx(dmp_s, dmm_s, atr_s)]
 
@@ -169,21 +175,32 @@ def _compute_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> float:
         dmm_s = (dmm_s * (period - 1) + dm_minus[i]) / period
         dx_series.append(_dx(dmp_s, dmm_s, atr_s))
 
-    return _wilder_smooth(dx_series, period)
+    adx = _wilder_smooth(dx_series, period)
+    di_plus_final = 100.0 * dmp_s / atr_s if atr_s > 0 else 0.0
+    di_minus_final = 100.0 * dmm_s / atr_s if atr_s > 0 else 0.0
+    return adx, di_plus_final, di_minus_final
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def classify_regime(adx: float, atr_pct: float) -> Regime:
+def classify_regime(
+    adx: float,
+    atr_pct: float,
+    di_plus: float = 0.0,
+    di_minus: float = 0.0,
+) -> Regime:
     """Classify regime from pre-computed indicator values.
 
-    Priority: VOLATILE (ATR%) > TREND (ADX) > CHOP.
+    Priority: VOLATILE (ATR%) > TREND/DOWNTREND (ADX + DI direction) > CHOP.
+    When ADX confirms a trend, DI- > DI+ → DOWNTREND; otherwise TREND.
 
     Args:
         adx: ADX value (0–100).
         atr_pct: ATR as percentage of last close.
+        di_plus: Directional Indicator + (0–100).
+        di_minus: Directional Indicator - (0–100).
 
     Returns:
         Classified ``Regime``.
@@ -191,6 +208,8 @@ def classify_regime(adx: float, atr_pct: float) -> Regime:
     if atr_pct > VOLATILE_ATR_PCT_THRESHOLD:
         return Regime.VOLATILE
     if adx > TREND_ADX_THRESHOLD:
+        if di_minus > di_plus:
+            return Regime.DOWNTREND
         return Regime.TREND
     return Regime.CHOP
 
@@ -221,12 +240,12 @@ def classify_regime_from_df(
         Returns CHOP with zero indicators when ``df`` has fewer than ``MIN_BARS`` rows.
     """
     if len(df) < MIN_BARS:
-        return RegimeResult(regime=Regime.CHOP, adx=0.0, atr_pct=0.0, symbol=symbol, timeframe=timeframe)
+        return RegimeResult(regime=Regime.CHOP, adx=0.0, atr_pct=0.0, di_plus=0.0, di_minus=0.0, symbol=symbol, timeframe=timeframe)
 
-    adx = _compute_adx(df, adx_period)
+    adx, di_plus, di_minus = _compute_adx(df, adx_period)
     atr_pct = _compute_atr_pct(df, atr_period)
-    regime = classify_regime(adx, atr_pct)
-    return RegimeResult(regime=regime, adx=adx, atr_pct=atr_pct, symbol=symbol, timeframe=timeframe)
+    regime = classify_regime(adx, atr_pct, di_plus, di_minus)
+    return RegimeResult(regime=regime, adx=adx, atr_pct=atr_pct, di_plus=di_plus, di_minus=di_minus, symbol=symbol, timeframe=timeframe)
 
 
 def get_regime(
