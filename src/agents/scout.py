@@ -16,12 +16,13 @@ from pydantic import BaseModel, Field
 
 from src.harness.pit_data import LookAheadError, PITDataView
 from src.agents.regime import Regime, RegimeResult, classify_regime_from_df
+from src.utils.config_loader import load_symbols
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_SYMBOLS: list[str] = ["BTC", "ETH", "SOL", "ARB", "DOGE"]
+DEFAULT_SYMBOLS: list[str] = load_symbols()
 MA_PERIODS: list[int] = [20, 50, 200]
 ENTRY_TOLERANCE_PCT: float = 1.5   # ±% of MA value to qualify as "at MA"
 ENTRY_TF: str = "1h"
@@ -50,6 +51,8 @@ class Candidate(BaseModel):
         regime: Entry-timeframe regime at the time of detection.
         confidence: Score in [0.0, 1.0]; higher = closer to MA and stronger trend.
         ts: decision_ts at which this candidate was generated.
+        daily_trend_direction: 'UP' if daily close > EMA-20 and EMA-20 slope is
+            positive; 'DOWN' otherwise.  None when daily data is insufficient.
     """
 
     symbol: str
@@ -59,6 +62,7 @@ class Candidate(BaseModel):
     regime: Regime
     confidence: float = Field(..., ge=0.0, le=1.0)
     ts: datetime
+    daily_trend_direction: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +144,65 @@ def _check_trend_alignment(df: pd.DataFrame, ma_period: int) -> bool:
     return last_close > ema
 
 
+def _is_btc_bearish(df_trend: pd.DataFrame) -> bool:
+    """Return True when BTC daily close is below EMA-20, EMA-50, and EMA-200.
+
+    Used as a macro filter: when BTC is in confirmed bear territory, altcoin
+    LONG candidates face a tighter daily-trend requirement.
+
+    Args:
+        df_trend: BTC daily OHLCV DataFrame (oldest row first).
+
+    Returns:
+        True when BTC close is below all three MA_PERIODS EMAs; False otherwise
+        or when data is insufficient.
+    """
+    if df_trend.empty:
+        return False
+    try:
+        last_close = float(df_trend["close"].iloc[-1])
+        for period in MA_PERIODS:
+            if last_close > _ema_current(df_trend, period):
+                return False
+        return True
+    except InsufficientDataError:
+        return False
+    except Exception:
+        return False
+
+
+def _daily_trend_direction(df_trend: pd.DataFrame) -> str | None:
+    """Classify the daily trend direction as 'UP' or 'DOWN'.
+
+    Returns 'UP' only when both conditions hold: daily close > EMA-20 AND
+    EMA-20 is rising (value 5 daily bars ago < current value).  Any other
+    combination returns 'DOWN'.
+
+    Args:
+        df_trend: Daily OHLCV DataFrame (oldest row first).
+
+    Returns:
+        ``'UP'``, ``'DOWN'``, or ``None`` when data is insufficient.
+    """
+    if len(df_trend) < 26:  # 20 bars for EMA + 5 for slope comparison
+        return None
+    try:
+        ema_series = df_trend["close"].ewm(span=20, adjust=False).mean()
+        last_close = float(df_trend["close"].iloc[-1])
+        ema_now = float(ema_series.iloc[-1])
+        ema_prev = float(ema_series.iloc[-6])  # 5 daily bars ago
+        if last_close > ema_now and ema_now > ema_prev:
+            return "UP"
+        return "DOWN"
+    except Exception:
+        return None
+
+
 def _scan_symbol(
     pit: PITDataView,
     symbol: str,
     decision_ts: datetime,
+    btc_bearish: bool = False,
 ) -> list[Candidate]:
     """Scan one symbol for pullback-to-MA setups across all MA periods.
 
@@ -155,6 +214,10 @@ def _scan_symbol(
         pit: Point-in-time data view.
         symbol: Coin name.
         decision_ts: Current replay timestamp (included in emitted Candidates).
+        btc_bearish: When True (BTC daily close is below EMA-20/50/200), the
+            minimum daily-trend EMA check is raised to EMA-50 — a pullback to
+            EMA-20 on an altcoin will only emit a candidate if that altcoin's
+            daily close is also above EMA-50.
 
     Returns:
         List of Candidates (may be empty).
@@ -174,6 +237,7 @@ def _scan_symbol(
     if regime_result.regime != Regime.TREND:
         return []
 
+    daily_dir = _daily_trend_direction(df_trend)
     current_price = float(df_entry["close"].iloc[-1])
     candidates: list[Candidate] = []
 
@@ -187,9 +251,11 @@ def _scan_symbol(
         if abs(dist_pct) > ENTRY_TOLERANCE_PCT:
             continue
 
-        # Only emit LONG candidates: daily close must be above the EMA
+        # Daily trend alignment — when BTC is bearish, require daily close
+        # above EMA-50 minimum instead of just EMA-20.
+        check_period = max(ma_period, 50) if btc_bearish else ma_period
         try:
-            if not _check_trend_alignment(df_trend, ma_period):
+            if not _check_trend_alignment(df_trend, check_period):
                 continue
         except InsufficientDataError:
             continue
@@ -205,6 +271,7 @@ def _scan_symbol(
                 regime=regime_result.regime,
                 confidence=confidence,
                 ts=decision_ts,
+                daily_trend_direction=daily_dir,
             )
         )
 
@@ -238,9 +305,22 @@ def scan(
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
 
+    # BTC macro gate: compute once before the symbol loop so each altcoin's
+    # _scan_symbol call can apply a tighter daily-EMA requirement when BTC is
+    # in full bear mode (daily close below EMA-20, EMA-50, and EMA-200).
+    btc_bearish = False
+    try:
+        df_btc_daily = pit.ohlcv("BTC", TREND_TF)
+        btc_bearish = _is_btc_bearish(df_btc_daily)
+    except LookAheadError:
+        raise
+    except Exception:
+        pass  # degrade gracefully — never block on missing BTC data
+
     all_candidates: list[Candidate] = []
     for symbol in symbols:
-        all_candidates.extend(_scan_symbol(pit, symbol, ts))
+        apply_btc_filter = btc_bearish and symbol != "BTC"
+        all_candidates.extend(_scan_symbol(pit, symbol, ts, btc_bearish=apply_btc_filter))
 
     all_candidates.sort(key=lambda c: c.confidence, reverse=True)
     return all_candidates
