@@ -118,7 +118,7 @@ async def get_funding(symbol: str) -> Optional[FundingSnapshot]:
     try:
         data = await _get(
             "/api/futures/funding-rate/history",
-            {"symbol": symbol, "exchange": "Binance", "interval": "h8", "limit": "1"},
+            {"symbol": f"{symbol}USDT", "exchange": "Binance", "interval": "h8", "limit": "1"},
         )
         rows = data.get("data") or []
         if not rows:
@@ -258,15 +258,21 @@ async def get_ls_ratio(symbol: str) -> Optional[LSRatio]:
     try:
         data = await _get(
             "/api/futures/global-long-short-account-ratio/history",
-            {"symbol": symbol, "exchange": "Binance", "interval": "h4", "limit": "1"},
+            {"symbol": f"{symbol}USDT", "exchange": "Binance", "interval": "h4", "limit": "1"},
         )
         rows = data.get("data") or []
         if not rows:
             _log.warning("coinglass_ls_ratio: empty response for %s", symbol)
             return None
         row = rows[-1] if isinstance(rows, list) else rows
-        long_raw = float(row.get("longAccount", row.get("longRatio", row.get("long", 0.5))))
-        short_raw = float(row.get("shortAccount", row.get("shortRatio", row.get("short", 0.5))))
+        long_raw = float(row.get(
+            "global_account_long_percent",
+            row.get("longAccount", row.get("longRatio", row.get("long", 0.5))),
+        ))
+        short_raw = float(row.get(
+            "global_account_short_percent",
+            row.get("shortAccount", row.get("shortRatio", row.get("short", 0.5))),
+        ))
         # Normalize: if values are in [0, 1] convert to percent
         if long_raw <= 1.0:
             long_raw *= 100.0

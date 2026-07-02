@@ -13,6 +13,8 @@ from typing import Any
 import httpx
 import pandas as pd
 
+from src.utils.config_loader import load_symbols
+
 _HL_URL = "https://api.hyperliquid.xyz/info"
 
 # Hyperliquid interval strings supported by the candleSnapshot endpoint
@@ -161,7 +163,7 @@ def _tf_ms(timeframe: str) -> int:
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Ingest Hyperliquid data to parquet")
-    parser.add_argument("--symbols", nargs="+", default=["BTC", "ETH", "SOL", "ARB", "DOGE"])
+    parser.add_argument("--symbols", nargs="+", default=load_symbols())
     parser.add_argument("--tf", default="1h", help="Candle timeframe (e.g. 1h, 4h, 1d)")
     parser.add_argument("--days", type=int, default=90, help="Days of history to fetch")
     parser.add_argument("--data-dir", default="./data_store", help="Parquet store root directory")
