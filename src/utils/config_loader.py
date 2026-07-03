@@ -6,6 +6,7 @@ stay in .env — only non-sensitive strategy config lives here.
 Public API:
     load_symbols() -> list[str]
     load_funding_thresholds() -> tuple[float, float]
+    load_trail_pct() -> float
 """
 from __future__ import annotations
 
@@ -70,3 +71,17 @@ def load_funding_thresholds() -> tuple[float, float]:
     extreme = float(cfg.get("funding_extreme_pct", 0.10))
     moderate = float(cfg.get("funding_moderate_pct", 0.05))
     return extreme, moderate
+
+
+def load_trail_pct() -> float:
+    """Return the stop-correction trail percentage from config.yaml.
+
+    Applied when a market fill lands below the proposal stop level (inverted
+    geometry due to stale OHLCV entry price). The corrected stop is set at
+    ``fill_price * (1 - trail_pct)`` so position_manager has a valid level.
+
+    Returns:
+        Trail percentage as a decimal (default 0.07 = 7%).
+    """
+    cfg = _load_config()
+    return float(cfg.get("tier_trail_pct", 0.07))

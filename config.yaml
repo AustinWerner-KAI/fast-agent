@@ -23,3 +23,8 @@ symbols:
 #   rate ≤ funding_moderate_pct → no objection raised
 funding_extreme_pct: 0.10
 funding_moderate_pct: 0.05
+
+# Stop correction when a market fill lands below the proposal's stop level.
+# This occurs when OHLCV-derived entry price is stale vs live market price.
+# Corrected stop = fill_price * (1 - tier_trail_pct). Does not reject the fill.
+tier_trail_pct: 0.07

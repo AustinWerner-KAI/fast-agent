@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.utils.config_loader import load_trail_pct
+
 __all__ = ["Executor", "ExecutorConfig"]
 
 _LOG = logging.getLogger(__name__)
@@ -265,22 +267,40 @@ class Executor:
 
         # ── Log filled ───────────────────────────────────────────────
         if result.status == "filled":
+            fill_price: float = result.filled_price or 0.0
+
+            # Post-fill geometry guard: a market order can fill below the
+            # proposal stop when OHLCV entry data is stale relative to the
+            # live market. Recompute a trailing stop rather than reject —
+            # the trade is real and must be tracked.
+            effective_stop = stop
+            if fill_price > 0 and fill_price < stop:
+                trail_pct = load_trail_pct()
+                effective_stop = round(fill_price * (1.0 - trail_pct), 8)
+                _LOG.warning(
+                    "executor: GEOMETRY_CORRECTED %s fill_price=%.6g "
+                    "original_stop=%.6g new_stop=%.6g (trail_pct=%.1f%%)",
+                    symbol, fill_price, stop, effective_stop, trail_pct * 100,
+                )
+
             fill_entry = {
                 "state": "filled",
                 "verdict_id": verdict_id,
                 "symbol": symbol,
                 "direction": direction,
                 "order_id": result.order_id,
-                "fill_price": result.filled_price,
+                "fill_price": fill_price,
                 "fill_size": result.size,
                 "margin_used": round(margin_used, 4),
                 "notional": round(notional, 4),
-                "stop": stop,
+                "stop": effective_stop,
                 "tp1": tp1,
                 "tp2": tp2,
                 "tp3": tp3,
                 "ts": _now_iso(),
             }
+            if effective_stop != stop:
+                fill_entry["original_stop"] = stop
             self._append_log(fill_entry)
             _LOG.info(
                 "executor: FILLED %s %s %.6f @ %s (margin=$%.2f notional=$%.2f)",
@@ -383,7 +403,7 @@ class Executor:
             **extra,
         }
         self._append_log(record)
-        _LOG.info("executor: %s — %s (%s)", state.upper(), reason, symbol)
+        _LOG.info("executor: %s %s — %s", state.upper(), symbol, reason)
         return record
 
 
