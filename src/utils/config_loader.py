@@ -7,10 +7,13 @@ Public API:
     load_symbols() -> list[str]
     load_funding_thresholds() -> tuple[float, float]
     load_trail_pct() -> float
+    load_trailing_stop_config() -> TrailConfig
+    load_take_profit_config() -> TakeProfitConfig
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -71,6 +74,85 @@ def load_funding_thresholds() -> tuple[float, float]:
     extreme = float(cfg.get("funding_extreme_pct", 0.10))
     moderate = float(cfg.get("funding_moderate_pct", 0.05))
     return extreme, moderate
+
+
+def load_conviction_sizing() -> dict:
+    """Return conviction-based position sizing config from config.yaml.
+
+    Returns:
+        Dict with ``tiers`` (list of ``{max_conviction, size_usd}`` dicts) and
+        ``free_margin_cap_pct``.  Falls back to empty tiers when the section is
+        absent (executor falls back to env-var sizing).
+    """
+    cfg = _load_config()
+    sizing = cfg.get("conviction_sizing") or {}
+    tiers = sizing.get("tiers") or []
+    cap_pct = float(sizing.get("free_margin_cap_pct", 0.02))
+    return {"tiers": list(tiers), "free_margin_cap_pct": cap_pct}
+
+
+@dataclass
+class TrailConfig:
+    """Trailing stop parameters from config.yaml position_management.trailing_stop."""
+
+    atr_period_h4: int = 14
+    atr_multiplier_chandelier: float = 2.0
+    stop_improvement_threshold_pct: float = 0.1
+    micro_break_buffer_pct: float = 0.15
+    enable_soft_trail_after_tp1: bool = False
+    enable_h4_atr_15m_combo_for_final_20: bool = True
+
+
+def load_trailing_stop_config() -> TrailConfig:
+    """Return trailing stop config from config.yaml position_management.trailing_stop.
+
+    Falls back to dataclass defaults when the section is absent.
+
+    Returns:
+        TrailConfig with all trailing stop parameters.
+    """
+    cfg = _load_config()
+    trail = (cfg.get("position_management") or {}).get("trailing_stop") or {}
+    return TrailConfig(
+        atr_period_h4=int(trail.get("atr_period_h4", 14)),
+        atr_multiplier_chandelier=float(trail.get("atr_multiplier_chandelier", 2.0)),
+        stop_improvement_threshold_pct=float(trail.get("stop_improvement_threshold_pct", 0.1)),
+        micro_break_buffer_pct=float(trail.get("micro_break_buffer_pct", 0.15)),
+        enable_soft_trail_after_tp1=bool(trail.get("enable_soft_trail_after_tp1", False)),
+        enable_h4_atr_15m_combo_for_final_20=bool(
+            trail.get("enable_h4_atr_15m_combo_for_final_20", True)
+        ),
+    )
+
+
+@dataclass
+class TakeProfitConfig:
+    """Resting TP order parameters from config.yaml position_management.take_profit."""
+
+    enable_resting_tp_orders: bool = True
+    tp1_rr: float = 2.0
+    tp2_rr: float = 3.0
+    tp1_fraction: float = 0.50
+    tp2_fraction: float = 0.30
+
+
+def load_take_profit_config() -> TakeProfitConfig:
+    """Return take-profit config from config.yaml position_management.take_profit.
+
+    Falls back to dataclass defaults when the section is absent.
+
+    Returns:
+        TakeProfitConfig with all TP parameters.
+    """
+    cfg = _load_config()
+    tp = (cfg.get("position_management") or {}).get("take_profit") or {}
+    return TakeProfitConfig(
+        enable_resting_tp_orders=bool(tp.get("enable_resting_tp_orders", True)),
+        tp1_rr=float(tp.get("tp1_rr", 2.0)),
+        tp2_rr=float(tp.get("tp2_rr", 3.0)),
+        tp1_fraction=float(tp.get("tp1_fraction", 0.50)),
+        tp2_fraction=float(tp.get("tp2_fraction", 0.30)),
+    )
 
 
 def load_trail_pct() -> float:

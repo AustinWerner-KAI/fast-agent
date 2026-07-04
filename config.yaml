@@ -28,3 +28,37 @@ funding_moderate_pct: 0.05
 # This occurs when OHLCV-derived entry price is stale vs live market price.
 # Corrected stop = fill_price * (1 - tier_trail_pct). Does not reject the fill.
 tier_trail_pct: 0.07
+
+# Conviction-based position sizing.
+# Tiers are evaluated in ascending max_conviction order; the first tier whose
+# max_conviction strictly exceeds the proposal's confidence score is used.
+# size_usd is the target notional (not margin); leverage is applied by executor.
+# free_margin_cap_pct caps margin per trade as a fraction of available margin.
+conviction_sizing:
+  tiers:
+    - max_conviction: 0.60   # conviction < 0.60
+      size_usd: 150
+    - max_conviction: 0.70   # 0.60 <= conviction < 0.70
+      size_usd: 250
+    - max_conviction: 0.80   # 0.70 <= conviction < 0.80
+      size_usd: 350
+    - max_conviction: 1.01   # conviction >= 0.80
+      size_usd: 500
+  free_margin_cap_pct: 0.33
+
+# H4 ATR Chandelier + 15m micro-structure trailing stop.
+# Applied by position_manager after TP1 / TP2 is hit.
+position_management:
+  take_profit:
+    enable_resting_tp_orders: true
+    tp1_rr: 2.0          # R-multiple for TP1 trigger price
+    tp2_rr: 3.0          # R-multiple for TP2 trigger price
+    tp1_fraction: 0.50   # fraction of original_size closed at TP1
+    tp2_fraction: 0.30   # fraction of original_size closed at TP2
+  trailing_stop:
+    atr_period_h4: 14                       # Wilder ATR period on H4 candles
+    atr_multiplier_chandelier: 2.0          # stop = running_high - 2.0 × ATR_H4
+    stop_improvement_threshold_pct: 0.1     # ignore chandelier updates < 0.1% better
+    micro_break_buffer_pct: 0.15            # 15m close must be ≥ 15% below EMA-20 to confirm
+    enable_soft_trail_after_tp1: false      # raise stop to chandelier between TP1 and TP2
+    enable_h4_atr_15m_combo_for_final_20: true  # gate final 20% exit on 15m confirmation

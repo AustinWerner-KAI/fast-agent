@@ -207,6 +207,16 @@ class LiveBroker:
         decimals = self._sz_decimals.get(symbol, 5)
         return round(size, decimals)
 
+    def _round_price(self, symbol: str, price: float) -> float:
+        """Round price to Hyperliquid's required tick precision.
+
+        Hyperliquid requires prices with at most 5 significant figures, rounded
+        to ``6 - szDecimals`` decimal places for perps.  Mirrors the internal
+        ``_slippage_price`` rounding in the SDK.
+        """
+        sz_dec = self._sz_decimals.get(symbol, 0)
+        return round(float(f"{price:.5g}"), 6 - sz_dec)
+
     # ------------------------------------------------------------------
     # Order management
     # ------------------------------------------------------------------
@@ -258,6 +268,176 @@ class LiveBroker:
         first = statuses[0] if statuses else {}
         filled = first.get("filled")
         order_id = str(first.get("resting", {}).get("oid", "") or first.get("filled", {}).get("oid", "") or "unknown")
+        fill_price = float(filled.get("avgPx", 0)) if filled else None
+        status: Literal["filled", "open", "error"] = (
+            "filled" if filled else ("open" if first.get("resting") else "error")
+        )
+
+        return OrderResult(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            size=size,
+            filled_price=fill_price,
+            status=status,
+            raw=raw,
+        )
+
+    def place_stop_order(
+        self,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        size: float,
+        trigger_price: float,
+        slippage: float = 0.10,
+    ) -> OrderResult:
+        """Place a stop-market (trigger) order on Hyperliquid.
+
+        Triggers when mark price crosses ``trigger_price`` and executes as a
+        market order.  Always placed with ``reduce_only=True`` — callers must
+        ensure the position exists before calling this.
+
+        Args:
+            symbol: Coin name (e.g. "BTC").
+            side: "SELL" to close a LONG, "BUY" to close a SHORT.
+            size: Position size in coin units.
+            trigger_price: Price at which the stop triggers.
+            slippage: Worst acceptable fill relative to trigger (default 10%).
+
+        Returns:
+            OrderResult with order_id and status "open" once resting on exchange.
+
+        Raises:
+            LiveBrokerError: On SDK or network error.
+        """
+        is_buy = side == "BUY"
+        size = self._round_size(symbol, size)
+        if size <= 0:
+            raise LiveBrokerError(f"place_stop_order: size rounds to zero for {symbol}")
+
+        # Round trigger and limit prices to Hyperliquid's tick precision
+        # (5 sig figs, 6 - szDecimals decimal places) before sending.
+        trigger_price = self._round_price(symbol, trigger_price)
+
+        # limit_px is the worst acceptable execution price after trigger.
+        # For SELL stops (close LONG): worst = below trigger.
+        # For BUY stops (close SHORT): worst = above trigger.
+        raw_limit = trigger_price * (1.0 + slippage) if is_buy else trigger_price * (1.0 - slippage)
+        limit_px = self._round_price(symbol, raw_limit)
+
+        order_type: dict = {
+            "trigger": {
+                "triggerPx": trigger_price,
+                "isMarket": True,
+                "tpsl": "sl",
+            }
+        }
+
+        try:
+            result = self._exchange.order(
+                symbol,
+                is_buy,
+                size,
+                limit_px,
+                order_type,
+                reduce_only=True,
+            )
+        except Exception as exc:
+            raise LiveBrokerError(
+                f"place_stop_order failed ({symbol} {side} {size} @ {trigger_price}): {exc}"
+            ) from exc
+
+        raw: dict = result if isinstance(result, dict) else {}
+        statuses = raw.get("response", {}).get("data", {}).get("statuses", [{}])
+        first = statuses[0] if statuses else {}
+        filled = first.get("filled")
+        order_id = str(
+            first.get("resting", {}).get("oid", "")
+            or (filled or {}).get("oid", "")
+            or "unknown"
+        )
+        fill_price = float(filled.get("avgPx", 0)) if filled else None
+        status: Literal["filled", "open", "error"] = (
+            "filled" if filled else ("open" if first.get("resting") else "error")
+        )
+
+        return OrderResult(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            size=size,
+            filled_price=fill_price,
+            status=status,
+            raw=raw,
+        )
+
+    def place_tp_order(
+        self,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        size: float,
+        trigger_price: float,
+        slippage: float = 0.05,
+    ) -> OrderResult:
+        """Place a take-profit trigger order (tpsl="tp") with reduce_only=True.
+
+        Mirrors place_stop_order exactly; only ``tpsl`` differs (``"tp"`` vs
+        ``"sl"``).  Fires a market order when mark price reaches trigger_price
+        in the profitable direction.
+
+        Args:
+            symbol: Coin name (e.g. "BTC").
+            side: "SELL" to take profit on a LONG, "BUY" to take profit on a SHORT.
+            size: Position size in coin units to close.
+            trigger_price: Price at which the TP triggers.
+            slippage: Worst acceptable fill relative to trigger (default 5%).
+
+        Returns:
+            OrderResult with order_id and status "open" once resting on exchange.
+
+        Raises:
+            LiveBrokerError: On SDK or network error.
+        """
+        is_buy = side == "BUY"
+        size = self._round_size(symbol, size)
+        if size <= 0:
+            raise LiveBrokerError(f"place_tp_order: size rounds to zero for {symbol}")
+
+        trigger_price = self._round_price(symbol, trigger_price)
+        raw_limit = trigger_price * (1.0 + slippage) if is_buy else trigger_price * (1.0 - slippage)
+        limit_px = self._round_price(symbol, raw_limit)
+
+        order_type: dict = {
+            "trigger": {
+                "triggerPx": trigger_price,
+                "isMarket": True,
+                "tpsl": "tp",
+            }
+        }
+
+        try:
+            result = self._exchange.order(
+                symbol,
+                is_buy,
+                size,
+                limit_px,
+                order_type,
+                reduce_only=True,
+            )
+        except Exception as exc:
+            raise LiveBrokerError(
+                f"place_tp_order failed ({symbol} {side} {size} @ {trigger_price}): {exc}"
+            ) from exc
+
+        raw: dict = result if isinstance(result, dict) else {}
+        statuses = raw.get("response", {}).get("data", {}).get("statuses", [{}])
+        first = statuses[0] if statuses else {}
+        filled = first.get("filled")
+        order_id = str(
+            first.get("resting", {}).get("oid", "")
+            or (filled or {}).get("oid", "")
+            or "unknown"
+        )
         fill_price = float(filled.get("avgPx", 0)) if filled else None
         status: Literal["filled", "open", "error"] = (
             "filled" if filled else ("open" if first.get("resting") else "error")
@@ -403,6 +583,24 @@ class LiveBroker:
             return fills
         except Exception:
             return []
+
+    def get_open_order_ids(self) -> set[str]:
+        """Return the set of open order IDs for the account.
+
+        Used by position_manager to detect when a resting TP order has been
+        filled (order ID disappears from open orders).
+
+        Returns:
+            Set of order ID strings; empty set on error (caller falls back to
+            mark-price detection).
+        """
+        try:
+            data = _http_post({"type": "openOrders", "user": self._account_address})
+            if isinstance(data, list):
+                return {str(o["oid"]) for o in data if o.get("oid") is not None}
+            return set()
+        except Exception:
+            return set()
 
     def get_mark_price(self, symbol: str) -> float | None:
         """Return the current mark price for a symbol.

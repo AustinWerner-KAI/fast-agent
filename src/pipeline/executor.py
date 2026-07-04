@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.utils.config_loader import load_trail_pct
+from src.utils.config_loader import load_conviction_sizing, load_trail_pct
 
 __all__ = ["Executor", "ExecutorConfig"]
 
@@ -192,9 +192,23 @@ class Executor:
                 free_margin=free_margin,
             )
 
-        # ── Sizing ───────────────────────────────────────────────────
-        margin_cap = cfg.max_position_usd / cfg.max_leverage
-        margin_used = min(free_margin * cfg.max_position_pct, margin_cap)
+        # ── Conviction-based sizing ──────────────────────────────────
+        try:
+            conviction = float(proposal.conviction if hasattr(proposal, "conviction") else proposal.confidence)
+        except (TypeError, ValueError, AttributeError):
+            conviction = 0.5
+
+        conv_cfg = load_conviction_sizing()
+        tiers = conv_cfg.get("tiers", [])
+        if tiers:
+            notional_target = _lookup_conviction_usd(conviction, tiers)
+            cap_pct = float(conv_cfg.get("free_margin_cap_pct", cfg.max_position_pct))
+            margin_for_trade = notional_target / max(cfg.max_leverage, 1.0)
+            margin_cap_by_pct = free_margin * cap_pct
+            margin_used = min(margin_for_trade, margin_cap_by_pct)
+        else:
+            margin_cap = cfg.max_position_usd / max(cfg.max_leverage, 1.0)
+            margin_used = min(free_margin * cfg.max_position_pct, margin_cap)
         notional = margin_used * cfg.max_leverage
         units = notional / entry if entry > 0 else 0.0
 
@@ -283,7 +297,7 @@ class Executor:
                     symbol, fill_price, stop, effective_stop, trail_pct * 100,
                 )
 
-            fill_entry = {
+            fill_entry: dict[str, Any] = {
                 "state": "filled",
                 "verdict_id": verdict_id,
                 "symbol": symbol,
@@ -301,6 +315,28 @@ class Executor:
             }
             if effective_stop != stop:
                 fill_entry["original_stop"] = stop
+
+            # Place exchange stop order immediately — before logging so the
+            # stop_order_id is captured in the fill record atomically.
+            stop_side = "SELL" if direction == "LONG" else "BUY"
+            try:
+                stop_result = self._broker.place_stop_order(  # type: ignore[union-attr]
+                    symbol=symbol,
+                    side=stop_side,
+                    size=result.size,
+                    trigger_price=effective_stop,
+                )
+                fill_entry["stop_order_id"] = stop_result.order_id
+                _LOG.info(
+                    "executor: STOP_PLACED %s trigger=%.6g order_id=%s",
+                    symbol, effective_stop, stop_result.order_id,
+                )
+            except Exception as exc:
+                _LOG.error(
+                    "executor: STOP_ORDER_FAILED %s trigger=%.6g: %s",
+                    symbol, effective_stop, exc,
+                )
+
             self._append_log(fill_entry)
             _LOG.info(
                 "executor: FILLED %s %s %.6f @ %s (margin=$%.2f notional=$%.2f)",
@@ -405,6 +441,21 @@ class Executor:
         self._append_log(record)
         _LOG.info("executor: %s %s — %s", state.upper(), symbol, reason)
         return record
+
+
+def _lookup_conviction_usd(conviction: float, tiers: list[dict]) -> float:
+    """Return the target notional USD for a given conviction score.
+
+    Tiers must have ``max_conviction`` and ``size_usd`` keys; sorted ascending
+    by ``max_conviction``.  The first tier whose ``max_conviction`` strictly
+    exceeds ``conviction`` wins.  If conviction is above all thresholds the
+    last tier applies.
+    """
+    sorted_tiers = sorted(tiers, key=lambda t: float(t["max_conviction"]))
+    for tier in sorted_tiers:
+        if conviction < float(tier["max_conviction"]):
+            return float(tier["size_usd"])
+    return float(sorted_tiers[-1]["size_usd"]) if sorted_tiers else 50.0
 
 
 def _now_iso() -> str:

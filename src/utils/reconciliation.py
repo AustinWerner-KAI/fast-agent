@@ -76,12 +76,15 @@ def _load_bot_positions(exec_log: Path) -> set[str]:
             except json.JSONDecodeError:
                 pass
 
+    _CLOSED_STATES = {
+        "closed", "stop_hit", "tp3_hit",
+        "chandelier_15m_exit", "daily_ema20_override_exit",
+    }
     active: set[str] = set()
-    closed_states = {"closed", "stop_hit", "tp3_hit"}
     for entry in latest_state.values():
         state = entry.get("state", "")
         symbol = entry.get("symbol", "")
-        if symbol and state == "filled" and state not in closed_states:
+        if symbol and state == "filled" and state not in _CLOSED_STATES:
             active.add(symbol)
     return active
 

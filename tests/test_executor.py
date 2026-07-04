@@ -26,6 +26,7 @@ def _make_broker(
     order_id: str = "order-1",
     status: str = "filled",
     size: float = 0.001,
+    stop_order_id: str = "stop-order-1",
 ) -> MagicMock:
     broker = MagicMock()
     broker.get_free_margin.return_value = free_margin
@@ -35,6 +36,9 @@ def _make_broker(
     result.filled_price = fill_price
     result.size = size
     broker.place_order.return_value = result
+    stop_result = MagicMock()
+    stop_result.order_id = stop_order_id
+    broker.place_stop_order.return_value = stop_result
     return broker
 
 
@@ -58,6 +62,7 @@ def _make_proposal(
     tp1: float = 52_000.0,
     tp2: float = 53_000.0,
     tp3: float = 54_000.0,
+    confidence: float = 0.75,
 ) -> MagicMock:
     p = MagicMock()
     p.symbol = symbol
@@ -67,6 +72,7 @@ def _make_proposal(
     p.tp1 = tp1
     p.tp2 = tp2
     p.tp3 = tp3
+    p.confidence = confidence
     return p
 
 
@@ -323,3 +329,82 @@ def test_orphaned_filled_without_closed_counts_as_active(tmp_path: Path) -> None
     with patch.dict(os.environ, _ENV):
         ex = Executor(_make_broker(), _make_guard(), _make_breaker(), exec_log=log)
         assert ex._count_active_positions() == 1
+
+
+# ---------------------------------------------------------------------------
+# Stop order placement tests
+# ---------------------------------------------------------------------------
+
+def test_stop_order_placed_immediately_after_fill(tmp_path: Path) -> None:
+    """Exchange stop order is placed immediately after fill confirmation."""
+    proposal = _make_proposal(entry=50_000.0, stop=49_000.0, tp1=52_000.0, tp2=53_000.0, tp3=54_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=50_100.0, stop_order_id="stop-99")
+
+    with patch.dict(os.environ, _ENV):
+        ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+        result = ex.execute("vid-stop", proposal, _make_candidate())
+
+    assert result["state"] == "filled"
+    broker.place_stop_order.assert_called_once()
+    kwargs = broker.place_stop_order.call_args.kwargs
+    assert kwargs["symbol"] == "BTC"
+    assert kwargs["side"] == "SELL"
+    assert kwargs["trigger_price"] == pytest.approx(49_000.0)
+
+
+def test_stop_order_id_logged_in_fill_entry(tmp_path: Path) -> None:
+    """stop_order_id is written to the filled log entry when stop is placed."""
+    proposal = _make_proposal(entry=50_000.0, stop=49_000.0, tp1=52_000.0, tp2=53_000.0, tp3=54_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=50_100.0, stop_order_id="stop-99")
+    log = tmp_path / "exec.jsonl"
+
+    with patch.dict(os.environ, _ENV):
+        ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=log)
+        result = ex.execute("vid-stop-log", proposal, _make_candidate())
+
+    assert result.get("stop_order_id") == "stop-99"
+    entries = [json.loads(l) for l in log.read_text().strip().splitlines()]
+    filled = next(e for e in entries if e["state"] == "filled")
+    assert filled.get("stop_order_id") == "stop-99"
+
+
+def test_fill_succeeds_when_stop_order_fails(tmp_path: Path) -> None:
+    """Fill is still logged successfully even if stop order placement fails."""
+    proposal = _make_proposal(entry=50_000.0, stop=49_000.0, tp1=52_000.0, tp2=53_000.0, tp3=54_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=50_100.0)
+    broker.place_stop_order.side_effect = Exception("network error")
+
+    with patch.dict(os.environ, _ENV):
+        ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+        result = ex.execute("vid-stop-fail", proposal, _make_candidate())
+
+    assert result["state"] == "filled"
+    assert "stop_order_id" not in result
+
+
+def test_stop_order_uses_corrected_stop_after_geometry_correction(tmp_path: Path) -> None:
+    """When fill is below proposal stop, stop order uses the geometry-corrected level."""
+    proposal = _make_proposal(entry=78_000.0, stop=77_000.0, tp1=80_000.0, tp2=82_000.0, tp3=84_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=58_000.0)
+
+    with patch.dict(os.environ, _ENV):
+        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07):
+            ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+            ex.execute("vid-stop-geo", proposal, _make_candidate())
+
+    kwargs = broker.place_stop_order.call_args.kwargs
+    expected_stop = round(58_000.0 * (1.0 - 0.07), 8)
+    assert kwargs["trigger_price"] == pytest.approx(expected_stop)
+
+
+def test_stop_order_not_placed_on_dry_run(tmp_path: Path) -> None:
+    """Stop order is not placed when TRADING_ENABLED=false."""
+    env = {**_ENV, "TRADING_ENABLED": "false"}
+    broker = _make_broker()
+
+    with patch.dict(os.environ, env):
+        ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+        result = ex.execute("vid-dry", _make_proposal(), _make_candidate())
+
+    assert result["state"] == "dry_run"
+    broker.place_stop_order.assert_not_called()
