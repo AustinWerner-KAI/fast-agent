@@ -45,7 +45,7 @@ __all__ = [
 
 _ENV_LOG_PATH = "FAST_AGENT_KILL_LOG"
 _DEFAULT_LOG_NAME = "kill_log.jsonl"
-_OPUS_MODEL = "claude-opus-4-8"
+_OPUS_MODEL = "claude-sonnet-4-6"
 _OPUS_MAX_TOKENS = 512
 
 
