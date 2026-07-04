@@ -194,7 +194,7 @@ class Executor:
 
         # ── Conviction-based sizing ──────────────────────────────────
         try:
-            conviction = float(proposal.conviction if hasattr(proposal, "conviction") else proposal.confidence)
+            conviction = float(proposal.confidence)
         except (TypeError, ValueError, AttributeError):
             conviction = 0.5
 
