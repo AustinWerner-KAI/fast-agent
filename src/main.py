@@ -41,7 +41,7 @@ from src.agents.proposer import ProposerInput, propose, ProposerError
 from src.agents.critic import CriticInput, critique, CriticError, compute_funding_crowded_severity
 from src.utils.config_loader import load_funding_thresholds
 from src.agents.arbiter import arbitrate, ArbiterVerdict, ArbiterError
-from src.pipeline.decision_memory import get_history
+from src.pipeline.decision_memory import get_history, get_cached_keys
 from src.data.coinglass_client import fetch_all_sync, CoinGlassSnapshot
 
 _LOG = logging.getLogger(__name__)
@@ -195,6 +195,7 @@ def _run_replay(
     client: anthropic.Anthropic,
     executor: Any = None,
     position_guard: Any = None,
+    memory_log_path: Path | None = None,
 ) -> dict[str, Any]:
     """Drive the Scout → Proposer → Critic → Arbiter → Executor pipeline over replay.
 
@@ -229,12 +230,15 @@ def _run_replay(
     stats: dict[str, Any] = {
         "bars": 0,
         "candidates": 0,
+        "skipped_cached": 0,
         "go": 0,
         "no_go": 0,
         "proposer_errors": 0,
         "critic_errors": 0,
         "kill_codes": Counter(),
     }
+
+    cached_keys: frozenset[tuple[str, str]] = get_cached_keys(memory_log_path)
 
     for state in engine.stream():
         stats["bars"] += 1
@@ -245,6 +249,14 @@ def _run_replay(
         for candidate in candidates:
             if max_candidates > 0 and stats["candidates"] >= max_candidates:
                 break
+
+            # --- Replay deduplication: skip bars already in decision_memory ---
+            _cts = candidate.ts.isoformat() if candidate.ts is not None else ""
+            if _cts and (candidate.symbol, _cts) in cached_keys:
+                stats["skipped_cached"] += 1
+                _LOG.info("skipped_cached_decision: %s @ %s", candidate.symbol, _cts)
+                continue
+
             stats["candidates"] += 1
 
             # --- Market context ---
@@ -326,6 +338,7 @@ def _run_replay(
                     coinglass_snapshot=cg_dict,
                     client=client,
                     funding_crowded_severity=funding_severity,
+                    memory_log_path=memory_log_path,
                 )
             except ArbiterError as exc:
                 print(f"  [ARBITER ERR] {candidate.symbol}: {exc}")
@@ -402,6 +415,8 @@ def _print_summary(stats: dict[str, Any], kill_log_path: Path) -> None:
     print(_DIVIDER)
     print(f"  Bars replayed:       {stats['bars']:>8,}")
     print(f"  Total candidates:    {stats['candidates']:>8,}")
+    if stats.get("skipped_cached"):
+        print(f"  Cached (skipped):    {stats['skipped_cached']:>8,}")
     print(f"  GO decisions:        {stats['go']:>8,}  ({go_pct:.1f}%)")
     print(f"  NO-GO decisions:     {stats['no_go']:>8,}  ({no_go_pct:.1f}%)")
     if stats["proposer_errors"]:

@@ -283,6 +283,7 @@ class TestRunReplay:
                 kill_log_path=tmp_path / "kill.jsonl",
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
         assert stats["candidates"] == 0
         assert stats["go"] == 0
@@ -303,6 +304,7 @@ class TestRunReplay:
                 kill_log_path=tmp_path / "kill.jsonl",
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
         assert stats["candidates"] == 1
         assert stats["go"] == 1
@@ -323,6 +325,7 @@ class TestRunReplay:
                 kill_log_path=kill_log,
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
 
         assert kill_log.exists()
@@ -347,6 +350,7 @@ class TestRunReplay:
                 kill_log_path=kill_log,
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
 
         assert stats["no_go"] == 1
@@ -368,6 +372,7 @@ class TestRunReplay:
                 kill_log_path=tmp_path / "kill.jsonl",
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=2, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
         assert stats["candidates"] == 2
 
@@ -386,6 +391,7 @@ class TestRunReplay:
                 kill_log_path=tmp_path / "kill.jsonl",
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
         assert stats["go"] == 1
         assert stats["kill_codes"]["FUNDING_CROWDED"] == 1
@@ -404,6 +410,7 @@ class TestRunReplay:
                 kill_log_path=tmp_path / "kill.jsonl",
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
         assert stats["no_go"] == 1
         assert stats["go"] == 0
@@ -419,6 +426,7 @@ class TestRunReplay:
                 kill_log_path=tmp_path / "kill.jsonl",
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
         assert stats["proposer_errors"] == 1
         assert stats["go"] == 0
@@ -436,6 +444,7 @@ class TestRunReplay:
                 kill_log_path=tmp_path / "kill.jsonl",
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
         assert stats["critic_errors"] == 1
         assert stats["go"] == 0
@@ -456,6 +465,7 @@ class TestRunReplay:
                 kill_log_path=kill_log,
                 initial_equity=100_000.0, risk_pct=1.0,
                 max_candidates=0, client=_mock_client(),
+                memory_log_path=tmp_path / "memory.jsonl",
             )
 
         lines = kill_log.read_text().strip().split("\n")

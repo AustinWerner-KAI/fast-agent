@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-__all__ = ["log_decision", "get_history", "update_outcome"]
+__all__ = ["log_decision", "get_history", "update_outcome", "get_cached_keys"]
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ class MemoryEntry(BaseModel):
     kill_code: str | None = None
     outcome_pct: float | None = None
     reflection: str | None = None
+    candidate_ts: str | None = None  # bar timestamp from Scout; None on legacy entries
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +261,10 @@ def log_decision(
         else None
     )
 
+    raw_candidate_ts: str | None = None
+    if hasattr(candidate, "ts") and candidate.ts is not None:
+        raw_candidate_ts = candidate.ts.isoformat()
+
     entry = MemoryEntry(
         ts=decision.ts.isoformat(),
         symbol=candidate.symbol,
@@ -271,6 +276,7 @@ def log_decision(
         confidence=float(candidate.confidence),
         decision=decision.verdict.value,
         kill_code=kill_code,
+        candidate_ts=raw_candidate_ts,
     )
 
     with path.open("a", encoding="utf-8") as fh:
@@ -361,6 +367,37 @@ def update_outcome(
         raise ValueError(f"decision_memory: no entry with id={decision_id!r}")
 
     _write_all(entries, path)
+
+
+# ---------------------------------------------------------------------------
+# Replay deduplication helper
+# ---------------------------------------------------------------------------
+
+def get_cached_keys(memory_path: Path | None = None) -> frozenset[tuple[str, str]]:
+    """Return (symbol, candidate_ts) pairs already recorded in the memory log.
+
+    Used by the replay loop to skip candles that have already been evaluated
+    in a previous run, eliminating redundant LLM calls on historical bars.
+    Entries written before ``candidate_ts`` was added have ``None`` and are
+    excluded — they will be re-evaluated once to populate the field.
+
+    Args:
+        memory_path: Override the default memory log path.
+
+    Returns:
+        Frozenset of ``(symbol, candidate_ts_iso)`` tuples.
+    """
+    path = memory_path or _memory_path()
+    try:
+        entries = _read_all(path)
+    except Exception as exc:
+        _LOG.warning("decision_memory: get_cached_keys failed — treating cache as empty: %s", exc)
+        return frozenset()
+    return frozenset(
+        (e.symbol, e.candidate_ts)
+        for e in entries
+        if e.candidate_ts is not None
+    )
 
 
 # ---------------------------------------------------------------------------
