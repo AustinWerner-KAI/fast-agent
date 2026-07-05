@@ -39,7 +39,7 @@ from src.harness.replay import ReplayEngine
 from src.agents.scout import scan, DEFAULT_SYMBOLS, ENTRY_TF
 from src.agents.proposer import ProposerInput, propose, ProposerError
 from src.agents.critic import CriticInput, critique, CriticError, compute_funding_crowded_severity
-from src.utils.config_loader import load_funding_thresholds
+from src.utils.config_loader import load_funding_thresholds, load_cache_ttl_hours
 from src.agents.arbiter import arbitrate, ArbiterVerdict, ArbiterError
 from src.pipeline.decision_memory import get_history, get_cached_keys
 from src.data.coinglass_client import fetch_all_sync, CoinGlassSnapshot
@@ -238,7 +238,9 @@ def _run_replay(
         "kill_codes": Counter(),
     }
 
-    cached_keys: frozenset[tuple[str, str]] = get_cached_keys(memory_log_path)
+    cached_keys: frozenset[tuple[str, str]] = get_cached_keys(
+        memory_log_path, cache_ttl_hours=load_cache_ttl_hours()
+    )
 
     for state in engine.stream():
         stats["bars"] += 1

@@ -155,6 +155,32 @@ def load_take_profit_config() -> TakeProfitConfig:
     )
 
 
+def load_cache_ttl_hours() -> float:
+    """Return decision_memory.cache_ttl_hours from config.yaml.
+
+    Controls how long a cached Arbiter verdict remains valid before the bar is
+    re-evaluated with fresh CoinGlass microstructure.  Default 24.0 hours.
+
+    Returns:
+        TTL in hours as a float.
+    """
+    cfg = _load_config()
+    return float((cfg.get("decision_memory") or {}).get("cache_ttl_hours", 24.0))
+
+
+def load_risk_pct_per_trade() -> float:
+    """Return position_management.risk_pct_per_trade from config.yaml.
+
+    Maximum loss as a fraction of margin_used when the geometry correction
+    fires (fill_price below proposal stop).  Defaults to 0.10 (10% of margin).
+
+    Returns:
+        Risk fraction as a decimal (e.g. ``0.10`` = 10%).
+    """
+    cfg = _load_config()
+    return float((cfg.get("position_management") or {}).get("risk_pct_per_trade", 0.10))
+
+
 def load_trail_pct() -> float:
     """Return the stop-correction trail percentage from config.yaml.
 

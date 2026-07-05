@@ -15,6 +15,12 @@ symbols:
   - HYPE
   - ZEC
 
+# Decision memory cache TTL. A cached Arbiter verdict is only reused when
+# evaluated_at is within this many hours of now. After expiry the bar is
+# re-evaluated with fresh CoinGlass data (funding, OI, L/S ratio).
+decision_memory:
+  cache_ttl_hours: 24
+
 # Funding rate thresholds for FUNDING_CROWDED severity (% per 8h).
 # Applies to LONG proposals only. Negative funding always favours longs and
 # never triggers FUNDING_CROWDED regardless of magnitude.
@@ -49,6 +55,10 @@ conviction_sizing:
 # H4 ATR Chandelier + 15m micro-structure trailing stop.
 # Applied by position_manager after TP1 / TP2 is hit.
 position_management:
+  # Max loss as a fraction of margin_used when geometry correction fires
+  # (fill_price < proposal stop due to stale OHLCV entry).
+  # Formula: effective_stop = fill_price - (margin_used * risk_pct_per_trade / fill_units)
+  risk_pct_per_trade: 0.10
   take_profit:
     enable_resting_tp_orders: true
     tp1_rr: 2.0          # R-multiple for TP1 trigger price

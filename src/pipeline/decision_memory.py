@@ -73,6 +73,7 @@ class MemoryEntry(BaseModel):
     outcome_pct: float | None = None
     reflection: str | None = None
     candidate_ts: str | None = None  # bar timestamp from Scout; None on legacy entries
+    evaluated_at: str | None = None  # UTC ISO timestamp when log_decision() ran
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +278,7 @@ def log_decision(
         decision=decision.verdict.value,
         kill_code=kill_code,
         candidate_ts=raw_candidate_ts,
+        evaluated_at=datetime.now(tz=timezone.utc).isoformat(),
     )
 
     with path.open("a", encoding="utf-8") as fh:
@@ -373,19 +375,28 @@ def update_outcome(
 # Replay deduplication helper
 # ---------------------------------------------------------------------------
 
-def get_cached_keys(memory_path: Path | None = None) -> frozenset[tuple[str, str]]:
-    """Return (symbol, candidate_ts) pairs already recorded in the memory log.
+def get_cached_keys(
+    memory_path: Path | None = None,
+    cache_ttl_hours: float = 24.0,
+) -> frozenset[tuple[str, str]]:
+    """Return (symbol, candidate_ts) pairs whose cached verdict is still fresh.
 
-    Used by the replay loop to skip candles that have already been evaluated
-    in a previous run, eliminating redundant LLM calls on historical bars.
-    Entries written before ``candidate_ts`` was added have ``None`` and are
-    excluded — they will be re-evaluated once to populate the field.
+    A cached verdict is only valid when the live CoinGlass data baked into it
+    (funding, OI, L/S ratio) is recent enough to still be representative.
+    Entries whose ``evaluated_at`` is older than ``cache_ttl_hours`` are
+    excluded so the bar is re-evaluated with fresh microstructure on the next run.
+
+    Entries missing ``evaluated_at`` or ``candidate_ts`` (legacy rows written
+    before these fields existed) are always excluded.
 
     Args:
         memory_path: Override the default memory log path.
+        cache_ttl_hours: Maximum age in hours for a cached verdict to remain
+            valid.  Defaults to 24.0 (one day).
 
     Returns:
-        Frozenset of ``(symbol, candidate_ts_iso)`` tuples.
+        Frozenset of ``(symbol, candidate_ts_iso)`` tuples whose verdict is
+        still within TTL.
     """
     path = memory_path or _memory_path()
     try:
@@ -393,11 +404,20 @@ def get_cached_keys(memory_path: Path | None = None) -> frozenset[tuple[str, str
     except Exception as exc:
         _LOG.warning("decision_memory: get_cached_keys failed — treating cache as empty: %s", exc)
         return frozenset()
-    return frozenset(
-        (e.symbol, e.candidate_ts)
-        for e in entries
-        if e.candidate_ts is not None
-    )
+
+    now = datetime.now(tz=timezone.utc)
+    cutoff_seconds = cache_ttl_hours * 3600
+    fresh: list[tuple[str, str]] = []
+    for e in entries:
+        if e.candidate_ts is None or e.evaluated_at is None:
+            continue
+        try:
+            age = (now - _parse_dt(e.evaluated_at)).total_seconds()
+        except Exception:
+            continue
+        if age <= cutoff_seconds:
+            fresh.append((e.symbol, e.candidate_ts))
+    return frozenset(fresh)
 
 
 # ---------------------------------------------------------------------------

@@ -188,72 +188,82 @@ def test_successful_fill_logs_intent_then_filled(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_geometry_corrected_when_fill_below_stop(tmp_path: Path) -> None:
-    """fill_price < stop → stop recomputed at fill_price * (1 - 0.07)."""
+    """fill_price < stop → stop recomputed as fill_price - (margin_used * risk_pct / fill_units)."""
     # Proposal entry=78_000, stop=77_000 (valid geometry)
     # Market fills at 58_000 (well below stop) — simulates stale OHLCV entry
+    # empty tiers → margin_used = min(200*0.10, 50/10) = 5.0; fill_units = 0.001
     proposal = _make_proposal(entry=78_000.0, stop=77_000.0, tp1=80_000.0, tp2=82_000.0, tp3=84_000.0)
-    broker = _make_broker(free_margin=200.0, fill_price=58_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=58_000.0, size=0.001)
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07):
-            ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
-            result = ex.execute("vid-geo", proposal, _make_candidate())
+        with patch("src.pipeline.executor.load_conviction_sizing", return_value={"tiers": [], "free_margin_cap_pct": 0.02}):
+            with patch("src.pipeline.executor.load_risk_pct_per_trade", return_value=0.10):
+                ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+                result = ex.execute("vid-geo", proposal, _make_candidate())
 
     assert result["state"] == "filled"
-    expected_stop = round(58_000.0 * (1.0 - 0.07), 8)
+    # margin_used=5.0, risk_pct=0.10 → max_risk_usd=0.5; fill_units=0.001
+    expected_stop = round(58_000.0 - (5.0 * 0.10 / 0.001), 8)
     assert result["stop"] == pytest.approx(expected_stop)
     assert result["original_stop"] == 77_000.0
 
 
 def test_geometry_corrected_stop_is_below_fill_price(tmp_path: Path) -> None:
     """Corrected stop must always be below fill_price."""
+    # fill_price=1600, margin_used=5.0, risk_pct=0.10, fill_units=0.001
+    # effective_stop = 1600 - (0.5 / 0.001) = 1100 < 1600 ✓
     proposal = _make_proposal(entry=2500.0, stop=2400.0, tp1=2600.0, tp2=2700.0, tp3=2800.0)
-    broker = _make_broker(free_margin=200.0, fill_price=1600.0)
+    broker = _make_broker(free_margin=200.0, fill_price=1600.0, size=0.001)
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07):
-            ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
-            result = ex.execute("vid-eth", proposal, _make_candidate("ETH"))
+        with patch("src.pipeline.executor.load_conviction_sizing", return_value={"tiers": [], "free_margin_cap_pct": 0.02}):
+            with patch("src.pipeline.executor.load_risk_pct_per_trade", return_value=0.10):
+                ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+                result = ex.execute("vid-eth", proposal, _make_candidate("ETH"))
 
     assert result["state"] == "filled"
     assert result["stop"] < result["fill_price"]
 
 
-def test_geometry_corrected_uses_config_trail_pct(tmp_path: Path) -> None:
-    """load_trail_pct is called when fill_price < stop."""
+def test_geometry_corrected_uses_config_risk_pct(tmp_path: Path) -> None:
+    """load_risk_pct_per_trade is called when fill_price < stop."""
+    # Use 5% risk instead of 10% to confirm the config value is respected.
+    # margin_used=5.0, risk_pct=0.05 → max_risk_usd=0.25; fill_units=0.001
     proposal = _make_proposal(entry=78_000.0, stop=77_000.0, tp1=80_000.0, tp2=82_000.0, tp3=84_000.0)
-    broker = _make_broker(free_margin=200.0, fill_price=58_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=58_000.0, size=0.001)
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.05) as mock_trail:
-            ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
-            ex.execute("vid-trail", proposal, _make_candidate())
+        with patch("src.pipeline.executor.load_conviction_sizing", return_value={"tiers": [], "free_margin_cap_pct": 0.02}):
+            with patch("src.pipeline.executor.load_risk_pct_per_trade", return_value=0.05) as mock_risk:
+                ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+                ex.execute("vid-risk", proposal, _make_candidate())
 
-    mock_trail.assert_called_once()
-    # 5% trail instead of 7%
+    mock_risk.assert_called_once()
     log_entries = [
         json.loads(l) for l in (tmp_path / "exec.jsonl").read_text().strip().splitlines()
     ]
     filled = next(e for e in log_entries if e["state"] == "filled")
-    assert filled["stop"] == pytest.approx(round(58_000.0 * 0.95, 8))
+    assert filled["stop"] == pytest.approx(round(58_000.0 - (5.0 * 0.05 / 0.001), 8))
 
 
 def test_geometry_corrected_logged_to_jsonl(tmp_path: Path) -> None:
     """original_stop field appears in filled log entry when correction applied."""
+    # margin_used=5.0, risk_pct=0.10, fill_units=0.001 → effective_stop=57_500
     proposal = _make_proposal(entry=78_000.0, stop=77_000.0, tp1=80_000.0, tp2=82_000.0, tp3=84_000.0)
-    broker = _make_broker(free_margin=200.0, fill_price=58_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=58_000.0, size=0.001)
     log = tmp_path / "exec.jsonl"
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07):
-            ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=log)
-            ex.execute("vid-log-check", proposal, _make_candidate())
+        with patch("src.pipeline.executor.load_conviction_sizing", return_value={"tiers": [], "free_margin_cap_pct": 0.02}):
+            with patch("src.pipeline.executor.load_risk_pct_per_trade", return_value=0.10):
+                ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=log)
+                ex.execute("vid-log-check", proposal, _make_candidate())
 
     entries = [json.loads(l) for l in log.read_text().strip().splitlines()]
     filled = next(e for e in entries if e["state"] == "filled")
     assert "original_stop" in filled
     assert filled["original_stop"] == 77_000.0
-    assert filled["stop"] == pytest.approx(round(58_000.0 * 0.93, 8))
+    assert filled["stop"] == pytest.approx(round(58_000.0 - (5.0 * 0.10 / 0.001), 8))
 
 
 def test_no_correction_when_fill_equals_stop(tmp_path: Path) -> None:
@@ -262,12 +272,12 @@ def test_no_correction_when_fill_equals_stop(tmp_path: Path) -> None:
     broker = _make_broker(free_margin=200.0, fill_price=49_000.0)
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07) as mock_trail:
+        with patch("src.pipeline.executor.load_risk_pct_per_trade") as mock_risk:
             ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
             result = ex.execute("vid-eq", proposal, _make_candidate())
 
     # fill == stop is not < stop, so no correction
-    mock_trail.assert_not_called()
+    mock_risk.assert_not_called()
     assert result["stop"] == 49_000.0
     assert "original_stop" not in result
 
@@ -278,11 +288,11 @@ def test_no_correction_when_fill_above_stop(tmp_path: Path) -> None:
     broker = _make_broker(free_margin=200.0, fill_price=50_500.0)
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07) as mock_trail:
+        with patch("src.pipeline.executor.load_risk_pct_per_trade") as mock_risk:
             ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
             result = ex.execute("vid-normal", proposal, _make_candidate())
 
-    mock_trail.assert_not_called()
+    mock_risk.assert_not_called()
     assert result["stop"] == 49_000.0
     assert "original_stop" not in result
 
@@ -291,13 +301,14 @@ def test_geometry_corrected_warning_is_logged(tmp_path: Path, caplog: pytest.Log
     """GEOMETRY_CORRECTED warning is emitted when stop is recomputed."""
     import logging
     proposal = _make_proposal(entry=78_000.0, stop=77_000.0, tp1=80_000.0, tp2=82_000.0, tp3=84_000.0)
-    broker = _make_broker(free_margin=200.0, fill_price=58_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=58_000.0, size=0.001)
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07):
-            with caplog.at_level(logging.WARNING, logger="src.pipeline.executor"):
-                ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
-                ex.execute("vid-warn", proposal, _make_candidate())
+        with patch("src.pipeline.executor.load_conviction_sizing", return_value={"tiers": [], "free_margin_cap_pct": 0.02}):
+            with patch("src.pipeline.executor.load_risk_pct_per_trade", return_value=0.10):
+                with caplog.at_level(logging.WARNING, logger="src.pipeline.executor"):
+                    ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+                    ex.execute("vid-warn", proposal, _make_candidate())
 
     assert any("GEOMETRY_CORRECTED" in r.message for r in caplog.records)
 
@@ -384,16 +395,18 @@ def test_fill_succeeds_when_stop_order_fails(tmp_path: Path) -> None:
 
 def test_stop_order_uses_corrected_stop_after_geometry_correction(tmp_path: Path) -> None:
     """When fill is below proposal stop, stop order uses the geometry-corrected level."""
+    # margin_used=5.0, risk_pct=0.10, fill_units=0.001 → effective_stop=57_500
     proposal = _make_proposal(entry=78_000.0, stop=77_000.0, tp1=80_000.0, tp2=82_000.0, tp3=84_000.0)
-    broker = _make_broker(free_margin=200.0, fill_price=58_000.0)
+    broker = _make_broker(free_margin=200.0, fill_price=58_000.0, size=0.001)
 
     with patch.dict(os.environ, _ENV):
-        with patch("src.pipeline.executor.load_trail_pct", return_value=0.07):
-            ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
-            ex.execute("vid-stop-geo", proposal, _make_candidate())
+        with patch("src.pipeline.executor.load_conviction_sizing", return_value={"tiers": [], "free_margin_cap_pct": 0.02}):
+            with patch("src.pipeline.executor.load_risk_pct_per_trade", return_value=0.10):
+                ex = Executor(broker, _make_guard(), _make_breaker(), exec_log=tmp_path / "exec.jsonl")
+                ex.execute("vid-stop-geo", proposal, _make_candidate())
 
     kwargs = broker.place_stop_order.call_args.kwargs
-    expected_stop = round(58_000.0 * (1.0 - 0.07), 8)
+    expected_stop = round(58_000.0 - (5.0 * 0.10 / 0.001), 8)
     assert kwargs["trigger_price"] == pytest.approx(expected_stop)
 
 

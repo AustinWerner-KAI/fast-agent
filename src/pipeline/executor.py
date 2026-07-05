@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.utils.config_loader import load_conviction_sizing, load_trail_pct
+from src.utils.config_loader import load_conviction_sizing, load_risk_pct_per_trade
 
 __all__ = ["Executor", "ExecutorConfig"]
 
@@ -288,13 +288,14 @@ class Executor:
             # live market. Recompute a trailing stop rather than reject —
             # the trade is real and must be tracked.
             effective_stop = stop
-            if fill_price > 0 and fill_price < stop:
-                trail_pct = load_trail_pct()
-                effective_stop = round(fill_price * (1.0 - trail_pct), 8)
+            if fill_price > 0 and fill_price < stop and result.size > 0:
+                risk_pct = load_risk_pct_per_trade()
+                max_risk_usd = margin_used * risk_pct
+                effective_stop = round(fill_price - (max_risk_usd / result.size), 8)
                 _LOG.warning(
                     "executor: GEOMETRY_CORRECTED %s fill_price=%.6g "
-                    "original_stop=%.6g new_stop=%.6g (trail_pct=%.1f%%)",
-                    symbol, fill_price, stop, effective_stop, trail_pct * 100,
+                    "original_stop=%.6g new_stop=%.6g (max_risk_usd=%.2f)",
+                    symbol, fill_price, stop, effective_stop, max_risk_usd,
                 )
 
             fill_entry: dict[str, Any] = {
