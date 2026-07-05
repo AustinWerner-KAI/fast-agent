@@ -80,7 +80,7 @@ def load_conviction_sizing() -> dict:
     """Return conviction-based position sizing config from config.yaml.
 
     Returns:
-        Dict with ``tiers`` (list of ``{max_conviction, size_usd}`` dicts) and
+        Dict with ``tiers`` (list of ``{max_conf, notional_usd}`` dicts) and
         ``free_margin_cap_pct``.  Falls back to empty tiers when the section is
         absent (executor falls back to env-var sizing).
     """

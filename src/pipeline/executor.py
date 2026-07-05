@@ -447,16 +447,16 @@ class Executor:
 def _lookup_conviction_usd(conviction: float, tiers: list[dict]) -> float:
     """Return the target notional USD for a given conviction score.
 
-    Tiers must have ``max_conviction`` and ``size_usd`` keys; sorted ascending
-    by ``max_conviction``.  The first tier whose ``max_conviction`` strictly
-    exceeds ``conviction`` wins.  If conviction is above all thresholds the
-    last tier applies.
+    Tiers must have ``max_conf`` and ``notional_usd`` keys; sorted ascending
+    by ``max_conf``.  The first tier whose ``max_conf`` strictly exceeds
+    ``conviction`` wins.  If conviction is above all thresholds the last tier
+    applies.
     """
-    sorted_tiers = sorted(tiers, key=lambda t: float(t["max_conviction"]))
+    sorted_tiers = sorted(tiers, key=lambda t: float(t["max_conf"]))
     for tier in sorted_tiers:
-        if conviction < float(tier["max_conviction"]):
-            return float(tier["size_usd"])
-    return float(sorted_tiers[-1]["size_usd"]) if sorted_tiers else 50.0
+        if conviction < float(tier["max_conf"]):
+            return float(tier["notional_usd"])
+    return float(sorted_tiers[-1]["notional_usd"]) if sorted_tiers else 50.0
 
 
 def _now_iso() -> str:
