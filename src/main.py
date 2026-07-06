@@ -504,7 +504,7 @@ def main() -> None:
 
             _pm_thread = threading.Thread(target=_run_pm, daemon=True, name="position-manager")
             _pm_thread.start()
-            _LOG.info("position_manager started on background thread %s", _pm_thread.name)
+            _LOG.warning("position_manager started on background thread %s", _pm_thread.name)
         except Exception as exc:
             _LOG.warning("position_manager could not start: %s", exc)
     # ─────────────────────────────────────────────────────────────────────────

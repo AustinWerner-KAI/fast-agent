@@ -197,7 +197,7 @@ class PositionManager:
 
     async def run(self) -> None:
         """Infinite poll loop — runs as asyncio.create_task()."""
-        _LOG.info("position_manager: started (poll_interval=%ds)", self._poll_interval)
+        _LOG.warning("position_manager: started (poll_interval=%ds)", self._poll_interval)
         while True:
             try:
                 self._sync_from_log()
