@@ -444,6 +444,11 @@ def _print_summary(stats: dict[str, Any], kill_log_path: Path) -> None:
 
 def main() -> None:
     """CLI entry point for the fast-agent paper-trading pipeline."""
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     parser = argparse.ArgumentParser(
         description="fast-agent: paper-trade replay — Scout → Proposer → Critic → Arbiter"
     )
