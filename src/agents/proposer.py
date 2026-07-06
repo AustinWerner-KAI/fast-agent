@@ -13,10 +13,14 @@ import os
 from datetime import datetime
 from typing import Any, Literal
 
+import logging
+
 import anthropic
 from pydantic import BaseModel, Field, model_validator
 
 from src.agents.scout import Candidate
+
+_LOG = logging.getLogger(__name__)
 
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 512
@@ -245,6 +249,22 @@ def _parse_response(
         reasoning: str = str(tool_input["reasoning"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ProposerError(f"Malformed tool arguments: {exc}") from exc
+
+    # Clamp stop if Haiku placed it closer than 0.5 × ATR to entry.
+    # When clamped, recompute all TPs at 2R/3R/4R from the new stop so
+    # geometry remains consistent and TP levels don't diverge from the stop.
+    min_stop_dist = 0.5 * inp.atr
+    actual_stop_dist = abs(entry - stop)
+    if actual_stop_dist < min_stop_dist:
+        _LOG.warning(
+            "proposer: STOP_TOO_TIGHT %s distance=%.6f min_required=%.6f (0.5×ATR=%.6f) "
+            "— clamping stop and recomputing TPs at 2R/3R/4R",
+            inp.candidate.symbol, actual_stop_dist, min_stop_dist, inp.atr,
+        )
+        stop = round(entry - min_stop_dist, 8)
+        tp1 = round(entry + 2.0 * min_stop_dist, 8)
+        tp2 = round(entry + 3.0 * min_stop_dist, 8)
+        tp3 = round(entry + 4.0 * min_stop_dist, 8)
 
     risk_usd, position_size_usd, rr = _compute_sizing(
         entry=entry,

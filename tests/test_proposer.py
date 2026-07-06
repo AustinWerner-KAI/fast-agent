@@ -336,6 +336,70 @@ class TestParseResponse:
         assert proposal.position_size_usd > 0
         assert proposal.risk_reward > 0
 
+    # ── ATR minimum stop clamp ────────────────────────────────────────────
+
+    def test_stop_too_tight_is_clamped_to_half_atr(self) -> None:
+        # Haiku proposes stop 0.0006 from entry; ATR=0.004 → min=0.002.
+        # Mirrors the TRX trade that triggered this fix.
+        inp = _inp(current_price=0.327576, atr=0.004)
+        response = _mock_response(
+            entry=0.3262, stop=0.3256,           # stop distance = 0.0006 < 0.002
+            tp1=0.3374, tp2=0.3486, tp3=0.3598,
+        )
+        proposal = _parse_response(response, inp)
+        expected_stop = round(0.3262 - 0.002, 8)
+        assert proposal.stop == pytest.approx(expected_stop, abs=1e-7)
+
+    def test_clamped_tps_are_at_2r_3r_4r(self) -> None:
+        inp = _inp(current_price=0.327576, atr=0.004)
+        response = _mock_response(
+            entry=0.3262, stop=0.3256,
+            tp1=0.3374, tp2=0.3486, tp3=0.3598,
+        )
+        proposal = _parse_response(response, inp)
+        stop_dist = proposal.entry - proposal.stop
+        assert proposal.tp1 == pytest.approx(proposal.entry + 2.0 * stop_dist, abs=1e-7)
+        assert proposal.tp2 == pytest.approx(proposal.entry + 3.0 * stop_dist, abs=1e-7)
+        assert proposal.tp3 == pytest.approx(proposal.entry + 4.0 * stop_dist, abs=1e-7)
+
+    def test_clamped_proposal_passes_geometry_validator(self) -> None:
+        inp = _inp(current_price=0.327576, atr=0.004)
+        response = _mock_response(
+            entry=0.3262, stop=0.3256,
+            tp1=0.3374, tp2=0.3486, tp3=0.3598,
+        )
+        proposal = _parse_response(response, inp)
+        # Geometry must hold after clamping: stop < entry < tp1 < tp2 < tp3
+        assert proposal.stop < proposal.entry
+        assert proposal.entry < proposal.tp1 < proposal.tp2 < proposal.tp3
+
+    def test_stop_at_exactly_half_atr_is_not_clamped(self) -> None:
+        # stop distance = exactly 0.5 × ATR → no warning, no change.
+        atr = 0.004
+        entry = 0.3262
+        stop = round(entry - 0.5 * atr, 8)   # = 0.3242, exactly at boundary
+        tp1 = round(entry + 2 * 0.5 * atr, 8)
+        tp2 = round(entry + 3 * 0.5 * atr, 8)
+        tp3 = round(entry + 4 * 0.5 * atr, 8)
+        inp = _inp(current_price=entry, atr=atr)
+        response = _mock_response(entry=entry, stop=stop, tp1=tp1, tp2=tp2, tp3=tp3)
+        proposal = _parse_response(response, inp)
+        # Stop must pass through unchanged
+        assert proposal.stop == pytest.approx(stop, abs=1e-8)
+
+    def test_stop_above_half_atr_is_not_clamped(self) -> None:
+        # Stop at 1.0 × ATR — well within bounds, should pass through unchanged.
+        atr = 800.0
+        entry = 50_000.0
+        stop = entry - atr   # 49200 — 1×ATR below entry
+        inp = _inp(current_price=entry, atr=atr)
+        response = _mock_response(
+            entry=entry, stop=stop,
+            tp1=entry + 2 * atr, tp2=entry + 3 * atr, tp3=entry + 4 * atr,
+        )
+        proposal = _parse_response(response, inp)
+        assert proposal.stop == pytest.approx(stop, abs=1e-6)
+
 
 # ---------------------------------------------------------------------------
 # propose (integration — client fully mocked)
