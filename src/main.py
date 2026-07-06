@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import threading
 import json
 import logging
 import os
@@ -494,15 +495,16 @@ def main() -> None:
     live_stack = _build_live_stack()
     if live_stack is not None:
         _broker, _guard, _breaker, _recon_report, _executor = live_stack
-        _position_manager_obj = None
         try:
             from src.pipeline.position_manager import PositionManager
-            _position_manager_obj = PositionManager(_broker)
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_position_manager_obj.run())
-            except RuntimeError:
-                pass  # no running loop at startup — position_manager deferred
+            _position_manager = PositionManager(_broker)
+
+            def _run_pm() -> None:
+                asyncio.run(_position_manager.run())
+
+            _pm_thread = threading.Thread(target=_run_pm, daemon=True, name="position-manager")
+            _pm_thread.start()
+            _LOG.info("position_manager started on background thread %s", _pm_thread.name)
         except Exception as exc:
             _LOG.warning("position_manager could not start: %s", exc)
     # ─────────────────────────────────────────────────────────────────────────

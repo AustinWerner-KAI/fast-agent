@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.utils.config_loader import load_conviction_sizing, load_risk_pct_per_trade
+from src.utils.config_loader import load_conviction_sizing, load_risk_pct_per_trade, load_take_profit_config
 
 __all__ = ["Executor", "ExecutorConfig"]
 
@@ -283,20 +283,24 @@ class Executor:
         if result.status == "filled":
             fill_price: float = result.filled_price or 0.0
 
-            # Post-fill geometry guard: a market order can fill below the
-            # proposal stop when OHLCV entry data is stale relative to the
-            # live market. Recompute a trailing stop rather than reject —
-            # the trade is real and must be tracked.
-            effective_stop = stop
-            if fill_price > 0 and fill_price < stop and result.size > 0:
-                risk_pct = load_risk_pct_per_trade()
-                max_risk_usd = margin_used * risk_pct
-                effective_stop = round(fill_price - (max_risk_usd / result.size), 8)
-                _LOG.warning(
-                    "executor: GEOMETRY_CORRECTED %s fill_price=%.6g "
-                    "original_stop=%.6g new_stop=%.6g (max_risk_usd=%.2f)",
-                    symbol, fill_price, stop, effective_stop, max_risk_usd,
-                )
+            # Always compute stop from fill_price using the margin formula so
+            # dollar risk is consistent regardless of slippage from intent.
+            # Direction-aware: LONG stop below fill, SHORT stop above fill.
+            risk_pct = load_risk_pct_per_trade()
+            max_risk_usd = margin_used * risk_pct
+            if fill_price > 0 and result.size > 0:
+                if direction == "LONG":
+                    effective_stop = round(fill_price - (max_risk_usd / result.size), 8)
+                else:
+                    effective_stop = round(fill_price + (max_risk_usd / result.size), 8)
+                if effective_stop != stop:
+                    _LOG.info(
+                        "executor: STOP_RECALC %s fill_price=%.6g proposal_stop=%.6g "
+                        "fill_stop=%.6g (max_risk_usd=%.2f)",
+                        symbol, fill_price, stop, effective_stop, max_risk_usd,
+                    )
+            else:
+                effective_stop = stop
 
             fill_entry: dict[str, Any] = {
                 "state": "filled",
@@ -337,6 +341,35 @@ class Executor:
                     "executor: STOP_ORDER_FAILED %s trigger=%.6g: %s",
                     symbol, effective_stop, exc,
                 )
+
+            # Place resting TP1 and TP2 trigger orders immediately after stop.
+            # Sizes are fractions of fill_size per config (tp1=50%, tp2=30%).
+            tp_cfg = load_take_profit_config()
+            tp_side: str = "SELL" if direction == "LONG" else "BUY"
+            tp1_size = round(result.size * tp_cfg.tp1_fraction, 8)
+            tp2_size = round(result.size * tp_cfg.tp2_fraction, 8)
+            try:
+                tp1_result = self._broker.place_tp_order(  # type: ignore[union-attr]
+                    symbol=symbol, side=tp_side, size=tp1_size, trigger_price=tp1,
+                )
+                fill_entry["tp1_order_id"] = str(tp1_result.order_id)
+                _LOG.info(
+                    "executor: TP1_PLACED %s trigger=%.6g size=%.6g order_id=%s",
+                    symbol, tp1, tp1_size, tp1_result.order_id,
+                )
+            except Exception as exc:
+                _LOG.error("executor: TP1_ORDER_FAILED %s trigger=%.6g: %s", symbol, tp1, exc)
+            try:
+                tp2_result = self._broker.place_tp_order(  # type: ignore[union-attr]
+                    symbol=symbol, side=tp_side, size=tp2_size, trigger_price=tp2,
+                )
+                fill_entry["tp2_order_id"] = str(tp2_result.order_id)
+                _LOG.info(
+                    "executor: TP2_PLACED %s trigger=%.6g size=%.6g order_id=%s",
+                    symbol, tp2, tp2_size, tp2_result.order_id,
+                )
+            except Exception as exc:
+                _LOG.error("executor: TP2_ORDER_FAILED %s trigger=%.6g: %s", symbol, tp2, exc)
 
             self._append_log(fill_entry)
             _LOG.info(
