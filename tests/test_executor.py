@@ -444,15 +444,19 @@ def test_tp1_and_tp2_orders_placed_after_fill(tmp_path: Path) -> None:
 
     assert broker.place_tp_order.call_count == 2
     calls = broker.place_tp_order.call_args_list
-    # TP1: trigger=52_000, size=50% of 0.001
+    # Executor recalculates TP triggers from fill_price, preserving proposal R:R.
+    # fill=50_100, effective_stop=49_600 (margin_used=5*0.10/0.001=500 away),
+    # stop_distance=500, proposal R:R: tp1=(52k-50k)/(50k-49k)=2.0, tp2=3.0
+    # effective_tp1 = 50_100 + 2.0*500 = 51_100
+    # effective_tp2 = 50_100 + 3.0*500 = 51_600
     kw1 = calls[0].kwargs
     assert kw1["symbol"] == "BTC"
     assert kw1["side"] == "SELL"
-    assert kw1["trigger_price"] == pytest.approx(52_000.0)
+    assert kw1["trigger_price"] == pytest.approx(51_100.0)
     assert kw1["size"] == pytest.approx(0.001 * 0.50, rel=1e-6)
-    # TP2: trigger=53_000, size=30% of 0.001
+    # TP2: trigger=51_600, size=30% of 0.001
     kw2 = calls[1].kwargs
-    assert kw2["trigger_price"] == pytest.approx(53_000.0)
+    assert kw2["trigger_price"] == pytest.approx(51_600.0)
     assert kw2["size"] == pytest.approx(0.001 * 0.30, rel=1e-6)
 
 

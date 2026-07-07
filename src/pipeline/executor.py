@@ -302,6 +302,32 @@ class Executor:
             else:
                 effective_stop = stop
 
+            # Recalculate TP levels from fill_price, preserving the proposal's
+            # R:R ratios. When fill deviates from the proposal entry (e.g. replay
+            # mode or heavy slippage) the proposal TPs would be anchored to the
+            # wrong base price — this keeps R:R consistent with actual execution.
+            actual_stop_distance = abs(fill_price - effective_stop)
+            proposal_stop_distance = abs(entry - stop)
+            if actual_stop_distance > 0 and proposal_stop_distance > 0:
+                tp1_rr = abs(tp1 - entry) / proposal_stop_distance
+                tp2_rr = abs(tp2 - entry) / proposal_stop_distance
+            else:
+                tp1_rr, tp2_rr = 2.0, 3.0
+            if direction == "LONG":
+                effective_tp1 = round(fill_price + tp1_rr * actual_stop_distance, 8)
+                effective_tp2 = round(fill_price + tp2_rr * actual_stop_distance, 8)
+            else:
+                effective_tp1 = round(fill_price - tp1_rr * actual_stop_distance, 8)
+                effective_tp2 = round(fill_price - tp2_rr * actual_stop_distance, 8)
+
+            if effective_tp1 != tp1 or effective_tp2 != tp2:
+                _LOG.info(
+                    "executor: TP_RECALC %s fill_price=%.6g "
+                    "proposal_tp1=%.6g fill_tp1=%.6g "
+                    "proposal_tp2=%.6g fill_tp2=%.6g",
+                    symbol, fill_price, tp1, effective_tp1, tp2, effective_tp2,
+                )
+
             fill_entry: dict[str, Any] = {
                 "state": "filled",
                 "verdict_id": verdict_id,
@@ -313,13 +339,17 @@ class Executor:
                 "margin_used": round(margin_used, 4),
                 "notional": round(notional, 4),
                 "stop": effective_stop,
-                "tp1": tp1,
-                "tp2": tp2,
+                "tp1": effective_tp1,
+                "tp2": effective_tp2,
                 "tp3": tp3,
                 "ts": _now_iso(),
             }
             if effective_stop != stop:
                 fill_entry["original_stop"] = stop
+            if effective_tp1 != tp1:
+                fill_entry["original_tp1"] = tp1
+            if effective_tp2 != tp2:
+                fill_entry["original_tp2"] = tp2
 
             # Place exchange stop order immediately — before logging so the
             # stop_order_id is captured in the fill record atomically.
@@ -350,26 +380,26 @@ class Executor:
             tp2_size = round(result.size * tp_cfg.tp2_fraction, 8)
             try:
                 tp1_result = self._broker.place_tp_order(  # type: ignore[union-attr]
-                    symbol=symbol, side=tp_side, size=tp1_size, trigger_price=tp1,
+                    symbol=symbol, side=tp_side, size=tp1_size, trigger_price=effective_tp1,
                 )
                 fill_entry["tp1_order_id"] = str(tp1_result.order_id)
                 _LOG.info(
                     "executor: TP1_PLACED %s trigger=%.6g size=%.6g order_id=%s",
-                    symbol, tp1, tp1_size, tp1_result.order_id,
+                    symbol, effective_tp1, tp1_size, tp1_result.order_id,
                 )
             except Exception as exc:
-                _LOG.error("executor: TP1_ORDER_FAILED %s trigger=%.6g: %s", symbol, tp1, exc)
+                _LOG.error("executor: TP1_ORDER_FAILED %s trigger=%.6g: %s", symbol, effective_tp1, exc)
             try:
                 tp2_result = self._broker.place_tp_order(  # type: ignore[union-attr]
-                    symbol=symbol, side=tp_side, size=tp2_size, trigger_price=tp2,
+                    symbol=symbol, side=tp_side, size=tp2_size, trigger_price=effective_tp2,
                 )
                 fill_entry["tp2_order_id"] = str(tp2_result.order_id)
                 _LOG.info(
                     "executor: TP2_PLACED %s trigger=%.6g size=%.6g order_id=%s",
-                    symbol, tp2, tp2_size, tp2_result.order_id,
+                    symbol, effective_tp2, tp2_size, tp2_result.order_id,
                 )
             except Exception as exc:
-                _LOG.error("executor: TP2_ORDER_FAILED %s trigger=%.6g: %s", symbol, tp2, exc)
+                _LOG.error("executor: TP2_ORDER_FAILED %s trigger=%.6g: %s", symbol, effective_tp2, exc)
 
             self._append_log(fill_entry)
             _LOG.info(
