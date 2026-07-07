@@ -53,6 +53,12 @@ class Candidate(BaseModel):
         ts: decision_ts at which this candidate was generated.
         daily_trend_direction: 'UP' if daily close > EMA-20 and EMA-20 slope is
             positive; 'DOWN' otherwise.  None when daily data is insufficient.
+        ema20_daily: Numeric value of EMA-20 on the daily timeframe at decision_ts.
+            None when fewer than 20 daily bars are available.
+        ema50_daily: Numeric value of EMA-50 on the daily timeframe.
+            None when fewer than 50 daily bars are available.
+        ema200_daily: Numeric value of EMA-200 on the daily timeframe.
+            None when fewer than 200 daily bars are available (requires --days >= 200).
     """
 
     symbol: str
@@ -63,6 +69,9 @@ class Candidate(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
     ts: datetime
     daily_trend_direction: str | None = None
+    ema20_daily: float | None = None
+    ema50_daily: float | None = None
+    ema200_daily: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +248,25 @@ def _scan_symbol(
 
     daily_dir = _daily_trend_direction(df_trend)
     current_price = float(df_entry["close"].iloc[-1])
+
+    # Compute daily EMA levels once per symbol — passed downstream as MA stack context.
+    # InsufficientDataError (< N bars) yields None; never blocks candidate generation.
+    ema20_daily: float | None = None
+    ema50_daily: float | None = None
+    ema200_daily: float | None = None
+    try:
+        ema20_daily = _ema_current(df_trend, 20)
+    except InsufficientDataError:
+        pass
+    try:
+        ema50_daily = _ema_current(df_trend, 50)
+    except InsufficientDataError:
+        pass
+    try:
+        ema200_daily = _ema_current(df_trend, 200)
+    except InsufficientDataError:
+        pass
+
     candidates: list[Candidate] = []
 
     for ma_period in MA_PERIODS:
@@ -272,6 +300,9 @@ def _scan_symbol(
                 confidence=confidence,
                 ts=decision_ts,
                 daily_trend_direction=daily_dir,
+                ema20_daily=ema20_daily,
+                ema50_daily=ema50_daily,
+                ema200_daily=ema200_daily,
             )
         )
 

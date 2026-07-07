@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
+from unittest.mock import patch
+
 from src.agents.scout import (
     ENTRY_TOLERANCE_PCT,
     Candidate,
@@ -17,6 +19,7 @@ from src.agents.scout import (
     _score_confidence,
     scan,
 )
+from src.agents.regime import Regime, RegimeResult
 from src.harness.pit_data import LookAheadError, PITDataView
 
 _TS = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -297,3 +300,96 @@ class TestScan:
         pit = MockPIT(data_1h={"BTC": df_entry}, data_1d={"BTC": df_trend})
         for c in scan(pit, ["BTC"]):
             assert 0.0 <= c.confidence <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Daily EMA fields on Candidate
+# ---------------------------------------------------------------------------
+
+class TestCandidateDailyEmaFields:
+    """Verify ema20/50/200_daily fields on Candidate and their population in _scan_symbol().
+
+    The existing test fixtures use flat 1h data which produces CHOP regime, so
+    _scan_symbol() returns no candidates.  These tests cover two layers:
+      1. Candidate model accepts the new fields with correct defaults.
+      2. _scan_symbol() populates the fields when candidates ARE emitted,
+         verified by patching the regime classifier to force TREND.
+    """
+
+    # ── Candidate model field tests (no pipeline required) ──────────────────
+
+    def test_candidate_ema_fields_default_to_none(self) -> None:
+        c = Candidate(
+            symbol="BTC", direction="LONG", ma_period=50,
+            distance_to_ma_pct=0.3, regime=Regime.TREND,
+            confidence=0.80, ts=_TS,
+        )
+        assert c.ema20_daily is None
+        assert c.ema50_daily is None
+        assert c.ema200_daily is None
+
+    def test_candidate_accepts_ema_float_values(self) -> None:
+        c = Candidate(
+            symbol="BTC", direction="LONG", ma_period=50,
+            distance_to_ma_pct=0.3, regime=Regime.TREND,
+            confidence=0.80, ts=_TS,
+            ema20_daily=105.0, ema50_daily=100.0, ema200_daily=90.0,
+        )
+        assert c.ema20_daily == pytest.approx(105.0)
+        assert c.ema50_daily == pytest.approx(100.0)
+        assert c.ema200_daily == pytest.approx(90.0)
+
+    # ── _scan_symbol() integration tests (regime classifier patched) ─────────
+
+    def _make_pit_with_n_daily(self, n_daily: int) -> MockPIT:
+        """1h data at EMA level (distance≈0%) + n_daily daily bars."""
+        df_1h = _at_ma_df(n=60, price=100.0)
+        df_1d = _rising_df(n=n_daily, step=0.5)
+        return MockPIT(data_1h={"BTC": df_1h}, data_1d={"BTC": df_1d})
+
+    def _trend_regime_result(self) -> RegimeResult:
+        return RegimeResult(regime=Regime.TREND, adx=35.0, atr_pct=1.0, symbol="BTC", timeframe="1h")
+
+    def test_ema20_and_ema50_populated_with_sufficient_daily_bars(self) -> None:
+        pit = self._make_pit_with_n_daily(250)
+        with patch("src.agents.scout.classify_regime_from_df", return_value=self._trend_regime_result()):
+            results = _scan_symbol(pit, "BTC", _TS)
+        assert results, "expected candidates with TREND regime forced"
+        for c in results:
+            assert c.ema20_daily is not None
+            assert c.ema50_daily is not None
+            assert isinstance(c.ema20_daily, float)
+            assert isinstance(c.ema50_daily, float)
+
+    def test_ema200_populated_when_200_daily_bars_available(self) -> None:
+        pit = self._make_pit_with_n_daily(250)
+        with patch("src.agents.scout.classify_regime_from_df", return_value=self._trend_regime_result()):
+            results = _scan_symbol(pit, "BTC", _TS)
+        assert results, "expected candidates with TREND regime forced"
+        for c in results:
+            assert c.ema200_daily is not None
+            assert isinstance(c.ema200_daily, float)
+
+    def test_ema200_is_none_when_fewer_than_200_daily_bars(self) -> None:
+        # 90-bar daily dataset — EMA-200 must silently yield None.
+        pit = self._make_pit_with_n_daily(90)
+        with patch("src.agents.scout.classify_regime_from_df", return_value=self._trend_regime_result()):
+            results = _scan_symbol(pit, "BTC", _TS)
+        assert results, "expected candidates with TREND regime forced"
+        for c in results:
+            assert c.ema200_daily is None, (
+                "ema200_daily must be None when fewer than 200 daily bars are available"
+            )
+
+    def test_all_candidates_from_same_symbol_share_same_ema_values(self) -> None:
+        # Multiple MA periods (20, 50, 200) may each emit a Candidate —
+        # they must all carry the identical daily EMA snapshot.
+        pit = self._make_pit_with_n_daily(250)
+        with patch("src.agents.scout.classify_regime_from_df", return_value=self._trend_regime_result()):
+            results = _scan_symbol(pit, "BTC", _TS)
+        if len(results) > 1:
+            ref = results[0]
+            for c in results[1:]:
+                assert c.ema20_daily == ref.ema20_daily
+                assert c.ema50_daily == ref.ema50_daily
+                assert c.ema200_daily == ref.ema200_daily

@@ -25,7 +25,7 @@ _LOG = logging.getLogger(__name__)
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 512
 
-__all__ = ["ProposerInput", "TradeProposal", "ProposerError", "propose"]
+__all__ = ["ProposerInput", "TradeProposal", "ProposerError", "propose", "_adjust_confidence_for_ma_stack"]
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +168,37 @@ _PROPOSAL_TOOL: dict[str, Any] = {
 # Private helpers
 # ---------------------------------------------------------------------------
 
+def _ma_stack_section(inp: ProposerInput) -> str:
+    """Build the daily MA stack context block for the prompt.
+
+    Returns an empty string when no daily EMA values are available.
+
+    Args:
+        inp: Proposer input whose candidate carries optional daily EMA values.
+
+    Returns:
+        Formatted multi-line string (trailing newline included) or ``""``.
+    """
+    c = inp.candidate
+    price = inp.current_price
+    rows: list[str] = []
+    for period, val in ((20, c.ema20_daily), (50, c.ema50_daily), (200, c.ema200_daily)):
+        if val is not None:
+            rel = "ABOVE" if price > val else "BELOW"
+            rows.append(f"  EMA-{period}: {val:.6g}  — price is {rel}")
+    if not rows:
+        return ""
+    if c.ema20_daily is not None and c.ema50_daily is not None and c.ema200_daily is not None:
+        if c.ema20_daily > c.ema50_daily > c.ema200_daily:
+            structure = "BULLISH (EMA-20 > EMA-50 > EMA-200)"
+        elif c.ema20_daily < c.ema50_daily < c.ema200_daily:
+            structure = "BEARISH (EMA-20 < EMA-50 < EMA-200)"
+        else:
+            structure = "MIXED"
+        rows.append(f"  MA structure: {structure}")
+    return "Daily MA stack:\n" + "\n".join(rows) + "\n\n"
+
+
 def _build_prompt(inp: ProposerInput) -> str:
     """Construct the user message sent to Claude.
 
@@ -194,6 +225,7 @@ def _build_prompt(inp: ProposerInput) -> str:
         f"  ATR (1h):      {inp.atr:.6g}  (use as stop-sizing reference)\n"
         f"  Regime:        {c.regime.value}\n"
         f"  Scout confidence: {c.confidence:.3f}\n\n"
+        + _ma_stack_section(inp)
         + (
             f"Market microstructure:\n"
             f"  Liquidation support below entry: "
@@ -205,10 +237,61 @@ def _build_prompt(inp: ProposerInput) -> str:
         f"  - Stop must be BELOW entry by 0.5–1.0 × ATR (keep it tight).\n"
         f"  - TP1 at 2:1 R:R (reward = 2 × stop distance above entry).\n"
         f"  - TP2 at 3:1 R:R, TP3 at 4:1 R:R — all above TP1.\n"
-        f"  - Geometry: stop < entry < tp1 < tp2 < tp3 (all positive).\n\n"
+        f"  - Geometry: stop < entry < tp1 < tp2 < tp3 (all positive).\n"
+        f"Daily MA alignment (LONG only):\n"
+        f"  - Price ABOVE EMA-200 daily: full conviction entry permitted.\n"
+        f"  - Price BELOW EMA-200 but ABOVE EMA-50: note as reduced conviction in reasoning.\n"
+        f"  - Price BELOW EMA-50 daily: note as low conviction in reasoning.\n"
+        f"  - Full BULLISH stack (price > EMA-20 > EMA-50 > EMA-200): note as high conviction.\n"
+        f"  - Do not propose a LONG entry if price is below all three daily MAs.\n\n"
         f"Example: entry=100, stop=99 (1 ATR), tp1=102 (2:1), tp2=103 (3:1), tp3=104 (4:1).\n\n"
         f"Call submit_trade_proposal with your proposed levels and a brief reasoning."
     )
+
+
+def _adjust_confidence_for_ma_stack(
+    confidence: float,
+    current_price: float,
+    ema20_daily: float | None,
+    ema50_daily: float | None,
+    ema200_daily: float | None,
+) -> float:
+    """Deterministically adjust Scout confidence based on daily MA alignment.
+
+    Adjustments (applied once, in order):
+    - EMA-200 unavailable: no adjustment (insufficient daily history).
+    - Price below EMA-200 AND below EMA-50: −0.20 (low conviction against trend).
+    - Price below EMA-200 only: −0.10 (reduced conviction).
+    - Full bullish stack (price > EMA-20 > EMA-50 > EMA-200): +0.05 bonus.
+    Result is clamped to [0.0, 1.0].
+
+    Args:
+        confidence: Raw Scout confidence in [0.0, 1.0].
+        current_price: Current market price (1h close).
+        ema20_daily: Daily EMA-20 value, or None when unavailable.
+        ema50_daily: Daily EMA-50 value, or None when unavailable.
+        ema200_daily: Daily EMA-200 value, or None when unavailable.
+
+    Returns:
+        Adjusted confidence clamped to [0.0, 1.0].
+    """
+    if ema200_daily is None:
+        return confidence
+    adjusted = confidence
+    if current_price < ema200_daily:
+        if ema50_daily is not None and current_price < ema50_daily:
+            adjusted -= 0.20
+        else:
+            adjusted -= 0.10
+    elif (
+        ema20_daily is not None
+        and ema50_daily is not None
+        and current_price > ema20_daily
+        and ema20_daily > ema50_daily
+        and ema50_daily > ema200_daily
+    ):
+        adjusted += 0.05
+    return round(max(0.0, min(1.0, adjusted)), 6)
 
 
 def _parse_response(
@@ -274,6 +357,14 @@ def _parse_response(
         risk_pct=inp.risk_pct,
     )
 
+    adjusted_confidence = _adjust_confidence_for_ma_stack(
+        confidence=inp.candidate.confidence,
+        current_price=inp.current_price,
+        ema20_daily=inp.candidate.ema20_daily,
+        ema50_daily=inp.candidate.ema50_daily,
+        ema200_daily=inp.candidate.ema200_daily,
+    )
+
     try:
         return TradeProposal(
             symbol=inp.candidate.symbol,
@@ -287,7 +378,7 @@ def _parse_response(
             risk_usd=risk_usd,
             risk_reward=rr,
             reasoning=reasoning,
-            confidence=inp.candidate.confidence,
+            confidence=adjusted_confidence,
             ts=inp.candidate.ts,
         )
     except Exception as exc:

@@ -201,6 +201,10 @@ class PositionManager:
         while True:
             try:
                 self._sync_from_log()
+                _LOG.warning(
+                    "position_manager tick: tracking %d positions",
+                    len(self._positions),
+                )
                 await self._check_all()
             except Exception as exc:
                 _LOG.error("position_manager: unhandled error in loop: %s", exc)

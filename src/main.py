@@ -11,7 +11,7 @@ Usage:
 
 Options:
     --symbols         Coins to scan (default: BTC ETH SOL ARB DOGE)
-    --days            Days of history to fetch and replay (default: 90)
+    --days            Days of history to fetch and replay (default: 220)
     --data-dir        Parquet store root directory (default: ./data_store)
     --kill-log        Append-only KILL log path (default: kill_log.jsonl)
     --equity          Starting account equity in USD (default: 100000)
@@ -456,7 +456,7 @@ def main() -> None:
         "--symbols", nargs="+", default=DEFAULT_SYMBOLS, help="Coins to scan"
     )
     parser.add_argument(
-        "--days", type=int, default=90, help="Days of history (default: 90)"
+        "--days", type=int, default=220, help="Days of history (default: 220)"
     )
     parser.add_argument(
         "--data-dir", default="./data_store", help="Parquet store root"

@@ -1,7 +1,7 @@
 """Ingest historical OHLCV and funding data from Hyperliquid into parquet.
 
 Usage:
-    python -m src.harness.ingest --symbols BTC ETH --tf 1h --days 90
+    python -m src.harness.ingest --symbols BTC ETH --tf 1h --days 220
 """
 from __future__ import annotations
 
@@ -165,7 +165,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest Hyperliquid data to parquet")
     parser.add_argument("--symbols", nargs="+", default=load_symbols())
     parser.add_argument("--tf", default="1h", help="Candle timeframe (e.g. 1h, 4h, 1d)")
-    parser.add_argument("--days", type=int, default=90, help="Days of history to fetch")
+    parser.add_argument("--days", type=int, default=220, help="Days of history to fetch")
     parser.add_argument("--data-dir", default="./data_store", help="Parquet store root directory")
     args = parser.parse_args()
 

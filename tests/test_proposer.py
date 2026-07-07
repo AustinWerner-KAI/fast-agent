@@ -16,8 +16,10 @@ from src.agents.proposer import (
     ProposerError,
     ProposerInput,
     TradeProposal,
+    _adjust_confidence_for_ma_stack,
     _build_prompt,
     _compute_sizing,
+    _ma_stack_section,
     _parse_response,
     propose,
 )
@@ -447,3 +449,154 @@ class TestPropose:
         propose(_inp(), client=client)
         messages = client.messages.create.call_args.kwargs["messages"]
         assert messages[0]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# _adjust_confidence_for_ma_stack
+# ---------------------------------------------------------------------------
+
+class TestAdjustConfidenceForMaStack:
+    """Deterministic daily-MA confidence adjustment logic."""
+
+    def test_no_ema200_returns_unchanged(self) -> None:
+        result = _adjust_confidence_for_ma_stack(0.80, 100.0, 95.0, 90.0, None)
+        assert result == pytest.approx(0.80)
+
+    def test_price_above_all_three_no_bonus_without_full_structure(self) -> None:
+        # EMA-20 < EMA-50 (mixed structure) — bullish bonus NOT applied.
+        result = _adjust_confidence_for_ma_stack(0.80, 110.0, 90.0, 95.0, 85.0)
+        assert result == pytest.approx(0.80)
+
+    def test_full_bullish_stack_adds_bonus(self) -> None:
+        # price (110) > EMA-20 (105) > EMA-50 (100) > EMA-200 (90)
+        result = _adjust_confidence_for_ma_stack(0.80, 110.0, 105.0, 100.0, 90.0)
+        assert result == pytest.approx(0.85)
+
+    def test_price_below_ema200_reduces_by_0_10(self) -> None:
+        # price below EMA-200 but above EMA-50
+        result = _adjust_confidence_for_ma_stack(0.80, 85.0, 95.0, 80.0, 90.0)
+        assert result == pytest.approx(0.70)
+
+    def test_price_below_ema200_and_ema50_reduces_by_0_20(self) -> None:
+        # price below both EMA-200 and EMA-50
+        result = _adjust_confidence_for_ma_stack(0.80, 70.0, 95.0, 80.0, 75.0)
+        assert result == pytest.approx(0.60)
+
+    def test_result_clamped_to_zero_minimum(self) -> None:
+        # Very low confidence pushed below zero by the −0.20 penalty.
+        result = _adjust_confidence_for_ma_stack(0.10, 70.0, 95.0, 80.0, 75.0)
+        assert result == pytest.approx(0.0)
+
+    def test_result_clamped_to_one_maximum(self) -> None:
+        # Confidence near 1.0 with bullish bonus must not exceed 1.0.
+        result = _adjust_confidence_for_ma_stack(0.98, 110.0, 105.0, 100.0, 90.0)
+        assert result == pytest.approx(1.0)
+
+    def test_ema200_none_skips_all_rules_including_penalty(self) -> None:
+        # Even when price is "below" all EMAs, None EMA-200 means no adjustment.
+        result = _adjust_confidence_for_ma_stack(0.60, 50.0, 95.0, 80.0, None)
+        assert result == pytest.approx(0.60)
+
+    def test_parse_response_uses_adjusted_confidence(self) -> None:
+        # Full bullish stack: price=110 > EMA-20=105 > EMA-50=100 > EMA-200=90.
+        # Base confidence=0.80 → adjusted=0.85.
+        # atr=2.0 → min_stop_dist=1.0; stop distance=2.0 is within bounds.
+        c = Candidate(
+            symbol="BTC", direction="LONG", ma_period=50,
+            distance_to_ma_pct=0.3, regime=Regime.TREND,
+            confidence=0.80, ts=_TS,
+            ema20_daily=105.0, ema50_daily=100.0, ema200_daily=90.0,
+        )
+        inp = ProposerInput(candidate=c, current_price=110.0, atr=2.0)
+        response = _mock_response(entry=110.0, stop=108.0, tp1=114.0, tp2=116.0, tp3=118.0)
+        proposal = _parse_response(response, inp)
+        assert proposal.confidence == pytest.approx(0.85)
+
+    def test_parse_response_penalises_below_ema200(self) -> None:
+        # price=85 < EMA-200=90 but > EMA-50=80 → −0.10 penalty.
+        # atr=2.0 → min_stop_dist=1.0; stop distance=2.0 is within bounds.
+        c = Candidate(
+            symbol="BTC", direction="LONG", ma_period=50,
+            distance_to_ma_pct=0.3, regime=Regime.TREND,
+            confidence=0.80, ts=_TS,
+            ema20_daily=95.0, ema50_daily=80.0, ema200_daily=90.0,
+        )
+        inp = ProposerInput(candidate=c, current_price=85.0, atr=2.0)
+        response = _mock_response(entry=85.0, stop=83.0, tp1=89.0, tp2=91.0, tp3=93.0)
+        proposal = _parse_response(response, inp)
+        assert proposal.confidence == pytest.approx(0.70)
+
+    def test_parse_response_no_adjustment_when_ema200_none(self) -> None:
+        # atr=2.0 → min_stop_dist=1.0; stop distance=2.0 is within bounds.
+        c = Candidate(
+            symbol="BTC", direction="LONG", ma_period=50,
+            distance_to_ma_pct=0.3, regime=Regime.TREND,
+            confidence=0.75, ts=_TS,
+            ema20_daily=95.0, ema50_daily=80.0, ema200_daily=None,
+        )
+        inp = ProposerInput(candidate=c, current_price=50.0, atr=2.0)
+        response = _mock_response(entry=50.0, stop=48.0, tp1=54.0, tp2=56.0, tp3=58.0)
+        proposal = _parse_response(response, inp)
+        assert proposal.confidence == pytest.approx(0.75)
+
+
+# ---------------------------------------------------------------------------
+# _ma_stack_section
+# ---------------------------------------------------------------------------
+
+class TestMaStackSection:
+    def _inp_with_emas(
+        self,
+        ema20: float | None = None,
+        ema50: float | None = None,
+        ema200: float | None = None,
+        price: float = 100.0,
+    ) -> ProposerInput:
+        c = Candidate(
+            symbol="BTC", direction="LONG", ma_period=50,
+            distance_to_ma_pct=0.3, regime=Regime.TREND,
+            confidence=0.80, ts=_TS,
+            ema20_daily=ema20, ema50_daily=ema50, ema200_daily=ema200,
+        )
+        return ProposerInput(candidate=c, current_price=price, atr=800.0)
+
+    def test_empty_when_all_none(self) -> None:
+        assert _ma_stack_section(self._inp_with_emas()) == ""
+
+    def test_contains_ema_values_when_set(self) -> None:
+        section = _ma_stack_section(self._inp_with_emas(ema20=95.0, ema50=90.0, ema200=85.0))
+        assert "EMA-20" in section
+        assert "EMA-50" in section
+        assert "EMA-200" in section
+
+    def test_above_below_labels_correct(self) -> None:
+        section = _ma_stack_section(self._inp_with_emas(ema200=90.0, price=100.0))
+        assert "ABOVE" in section
+
+        section_below = _ma_stack_section(self._inp_with_emas(ema200=110.0, price=100.0))
+        assert "BELOW" in section_below
+
+    def test_bullish_structure_label(self) -> None:
+        section = _ma_stack_section(self._inp_with_emas(ema20=105.0, ema50=100.0, ema200=90.0, price=110.0))
+        assert "BULLISH" in section
+
+    def test_bearish_structure_label(self) -> None:
+        section = _ma_stack_section(self._inp_with_emas(ema20=85.0, ema50=90.0, ema200=95.0, price=80.0))
+        assert "BEARISH" in section
+
+    def test_mixed_structure_label(self) -> None:
+        # EMA-20 > EMA-200 but EMA-50 in between in wrong order → MIXED
+        section = _ma_stack_section(self._inp_with_emas(ema20=100.0, ema50=110.0, ema200=90.0, price=105.0))
+        assert "MIXED" in section
+
+    def test_build_prompt_includes_ma_stack_when_emas_set(self) -> None:
+        inp = self._inp_with_emas(ema20=95.0, ema50=90.0, ema200=85.0, price=100.0)
+        prompt = _build_prompt(inp)
+        assert "Daily MA stack" in prompt
+        assert "EMA-20" in prompt
+        assert "EMA-200" in prompt
+
+    def test_build_prompt_no_ma_stack_when_all_none(self) -> None:
+        inp = self._inp_with_emas()
+        prompt = _build_prompt(inp)
+        assert "Daily MA stack" not in prompt
