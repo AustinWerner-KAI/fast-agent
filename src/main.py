@@ -167,22 +167,33 @@ def _last_decision_id() -> str:
         return str(uuid4())
 
 
+_ENTRY_DAYS = 90   # 1h candles — regime + entry EMAs (2 160 bars, 1 API batch)
+_TREND_DAYS = 220  # 1d candles — daily EMA-200 requires ≥ 200 bars
+
+
 def _run_ingest(symbols: list[str], days: int, data_dir: Path) -> None:
     """Fetch and persist fresh OHLCV and funding data for all symbols.
 
-    Fetches both the 1h (entry) and 1d (trend) timeframes required by Scout.
+    The 1h (entry) timeframe is always fetched at _ENTRY_DAYS (90) — enough
+    for regime detection and 1h EMA-200, and fits in a single API batch.
+    The 1d (trend) timeframe uses max(days, _TREND_DAYS) so daily EMA-200
+    always has sufficient bars regardless of the --days flag.
 
     Args:
         symbols: Coin names to ingest.
-        days: How many calendar days of history to pull.
+        days: Override for the 1d lookback (default CLI value: 220).
         data_dir: Root of the parquet store.
     """
+    trend_days = max(days, _TREND_DAYS)
     print(_DIVIDER)
-    print(f"  INGEST  {days}d history · {len(symbols)} symbols: {', '.join(symbols)}")
+    print(
+        f"  INGEST  {_ENTRY_DAYS}d 1h · {trend_days}d 1d"
+        f" · {len(symbols)} symbols: {', '.join(symbols)}"
+    )
     print(_DIVIDER)
     for sym in symbols:
-        for tf in ["1h", "1d"]:
-            ingest_symbol(sym, tf, days, data_dir)
+        ingest_symbol(sym, "1h", _ENTRY_DAYS, data_dir)
+        ingest_symbol(sym, "1d", trend_days, data_dir)
     print("Ingest complete.\n")
 
 
