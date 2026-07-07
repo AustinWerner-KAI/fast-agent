@@ -23,12 +23,46 @@ VALID_TF = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
 # Maximum candles per request (Hyperliquid limit)
 _BATCH = 5_000
 
+# 429 retry: wait 2s, 4s, 8s before giving up
+_RETRY_DELAYS = (2.0, 4.0, 8.0)
+
 
 def _hl_post(payload: dict[str, Any], timeout: float = 30.0) -> Any:
-    """POST to Hyperliquid info endpoint and return parsed JSON."""
-    resp = httpx.post(_HL_URL, json=payload, timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()
+    """POST to Hyperliquid info endpoint and return parsed JSON.
+
+    Retries up to len(_RETRY_DELAYS) times on HTTP 429 with exponential
+    back-off so the ingest survives Hyperliquid's per-IP rate limiter.
+    """
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=0):
+        try:
+            resp = httpx.post(_HL_URL, json=payload, timeout=timeout)
+            if resp.status_code == 429:
+                if delay is None:
+                    resp.raise_for_status()
+                print(
+                    f"  [ingest] 429 rate-limit on attempt {attempt + 1} "
+                    f"— retrying in {delay}s"
+                )
+                time.sleep(delay)  # type: ignore[arg-type]
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 and delay is not None:
+                last_exc = exc
+                print(
+                    f"  [ingest] 429 rate-limit on attempt {attempt + 1} "
+                    f"— retrying in {delay}s"
+                )
+                time.sleep(delay)  # type: ignore[arg-type]
+                continue
+            raise
+        except Exception:
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("_hl_post: exhausted retries")
 
 
 def fetch_ohlcv(
@@ -140,6 +174,7 @@ def ingest_symbol(
         print(f"  {symbol}/{timeframe}: no data returned")
 
     # --- Funding ---
+    time.sleep(0.3)  # brief pause before funding call to respect rate limit
     funding_path = sym_dir / "funding.parquet"
     funding = fetch_funding(symbol, start_ms)
     if not funding.empty:
